@@ -1,0 +1,1023 @@
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { supabase } from "./lib/supabaseClient";
+
+const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
+const CARD_PROVIDERS = ["Com Bank", "DFCC", "NTB", "Global"];
+const CURRENCIES = ["LKR", "USD", "EUR", "AUD"];
+const CUR_SYMBOL = { LKR: "Rs", USD: "$", EUR: "€", AUD: "A$" };
+const ROOM_STATUSES = [
+  { id: "vacant", label: "Vacant" },
+  { id: "checkin", label: "Check-in" },
+  { id: "staying", label: "Staying" },
+  { id: "checkout", label: "Check-out" },
+];
+const STATUS_STYLE = {
+  vacant: "bg-white border-slate-200 text-slate-500",
+  checkin: "bg-sky-50 border-sky-300 text-sky-800",
+  staying: "bg-teal-50 border-teal-300 text-teal-800",
+  checkout: "bg-amber-50 border-amber-300 text-amber-800",
+};
+const BCOM_CAT = "Room – Booking.com";
+const BCOM_RATE = 0.18;
+
+const fmt = (n) => "Rs " + Math.round(n || 0).toLocaleString("en-LK");
+const fmtCur = (n, currency) => {
+  const cur = currency || "LKR";
+  const sym = CUR_SYMBOL[cur] || cur;
+  if (cur === "LKR") return sym + " " + Math.round(n || 0).toLocaleString("en-LK");
+  return sym + " " + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const isRoomCat = (c) => c && c.startsWith("Room");
+
+// ---- Supabase <-> app-shape mapping ----
+const rowToTxn = (r) => ({
+  id: r.id,
+  type: r.type,
+  amount: Number(r.amount),
+  currency: r.currency || "LKR",
+  category: r.category,
+  room: r.room || undefined,
+  method: r.method,
+  date: r.txn_date,
+  note: r.note || "",
+  status: r.status,
+  enteredBy: r.entered_by,
+  edited: r.edited,
+});
+const rowToRoom = (r) => ({ no: r.no, status: r.status, guest: r.guest || "", out: r.checkout_date || "" });
+
+function Wave() {
+  return (
+    <svg viewBox="0 0 400 16" className="w-full block" preserveAspectRatio="none" style={{ height: 12 }} aria-hidden="true">
+      <path d="M0 8 Q 25 0, 50 8 T 100 8 T 150 8 T 200 8 T 250 8 T 300 8 T 350 8 T 400 8 V16 H0 Z" fill="#0d5c5c" opacity="0.12" />
+    </svg>
+  );
+}
+
+function StatCard({ label, value, tone }) {
+  const color = tone === "up" ? "text-emerald-700" : tone === "down" ? "text-rose-700" : "text-slate-800";
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-3">
+      <div className="text-xs text-slate-500 mb-1">{label}</div>
+      <div className={"text-lg font-semibold tabular-nums " + color}>{value}</div>
+    </div>
+  );
+}
+
+function TxnRow({ t, onDelete, onMarkPaid, onEdit, history }) {
+  const income = t.type === "income";
+  const pending = t.status === "pending";
+  const [showHistory, setShowHistory] = useState(false);
+  return (
+    <div className="py-2.5 border-b border-slate-100 last:border-0">
+      <div className="flex items-center gap-3">
+        <div className={"w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-sm font-semibold " + (income ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700")}>
+          {income ? "+" : "−"}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-slate-800 truncate flex items-center gap-2">
+            <span className="truncate">{t.category}{t.room ? " · Rm " + t.room : ""}</span>
+            {t.currency && t.currency !== "LKR" && <span className="text-[10px] font-semibold uppercase tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200 rounded px-1.5 py-0.5 shrink-0">{t.currency}</span>}
+            {pending && <span className="text-[10px] font-semibold uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">Pending</span>}
+            {t.edited && (
+              <button onClick={() => setShowHistory(!showHistory)} className="text-[10px] font-semibold uppercase tracking-wide bg-purple-50 text-purple-700 border border-purple-200 rounded px-1.5 py-0.5 shrink-0">Edited</button>
+            )}
+          </div>
+          <div className="text-xs text-slate-500 truncate">{t.note ? t.note + " · " : ""}{t.method} · {t.date}{t.enteredBy ? " · by " + t.enteredBy : ""}</div>
+        </div>
+        <div className={"text-sm font-semibold tabular-nums " + (income ? "text-emerald-700" : "text-rose-700")}>
+          {income ? "+" : "−"}{fmtCur(t.amount, t.currency).replace(/^\D+\s?/, "")}
+        </div>
+        {pending && onMarkPaid && (
+          <button onClick={() => onMarkPaid(t.id)} className="text-[10px] font-semibold text-teal-700 border border-teal-200 rounded px-1.5 py-1 shrink-0">Mark paid</button>
+        )}
+        {onEdit && <button onClick={() => onEdit(t.id)} className="text-slate-400 hover:text-teal-700 text-sm px-1" aria-label="Edit entry">✎</button>}
+        {onDelete && <button onClick={() => onDelete(t.id)} className="text-slate-300 hover:text-rose-500 text-xs px-1" aria-label="Delete entry">✕</button>}
+      </div>
+      {showHistory && history && history.length > 0 && (
+        <div className="ml-11 mt-1.5 bg-purple-50 border border-purple-200 rounded-lg p-2">
+          <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wide mb-1">Change history</p>
+          {history.map((h) => (
+            <p key={h.id} className="text-[11px] text-purple-800 mb-0.5 last:mb-0">
+              {new Date(h.changed_at).toLocaleString("en-LK", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} by {h.changed_by}: {h.summary}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CategoryPicker({ value, onChange, options, onAddNew }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+  const filtered = options.filter((o) => o.toLowerCase().includes(q.trim().toLowerCase()));
+  const exact = options.some((o) => o.toLowerCase() === q.trim().toLowerCase());
+  const pick = (o) => { onChange(o); setOpen(false); setQ(""); };
+  return (
+    <div className="relative mb-4" ref={ref}>
+      <button onClick={() => setOpen(!open)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm bg-white text-left flex items-center justify-between">
+        <span className="truncate">{value || "Select category"}</span>
+        <span className="text-slate-400 ml-2" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="absolute z-20 left-0 right-0 bg-white border border-slate-200 rounded-lg mt-1 shadow-lg overflow-hidden">
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Type to search…"
+            className="w-full px-3 py-2.5 text-sm border-b border-slate-100 focus:outline-none" />
+          <div className="max-h-52 overflow-y-auto">
+            {filtered.map((o) => (
+              <button key={o} onClick={() => pick(o)}
+                className={"w-full text-left px-3 py-2 text-sm border-b border-slate-50 last:border-0 " + (o === value ? "bg-teal-50 text-teal-800 font-medium" : "text-slate-700 hover:bg-slate-50")}>
+                {o}
+              </button>
+            ))}
+            {filtered.length === 0 && !q.trim() && <p className="px-3 py-3 text-xs text-slate-400">No categories</p>}
+            {q.trim() && !exact && (
+              <button onClick={() => { onAddNew(q.trim()); pick(q.trim()); }} className="w-full text-left px-3 py-2.5 text-sm text-teal-700 font-medium bg-teal-50/50">
+                + Add "{q.trim()}" as new category
+              </button>
+            )}
+            {q.trim() && exact && filtered.length === 0 && (
+              <button onClick={() => pick(q.trim())} className="w-full text-left px-3 py-2 text-sm text-slate-700">{q.trim()}</button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddForm({ onSave, onCancel, rooms, prefill, editTxn, incomeCats, expenseCats, onAddCategory }) {
+  const roomNos = rooms.map((r) => r.no);
+  const [type, setType] = useState(editTxn?.type || "income");
+  const [amount, setAmount] = useState(editTxn ? String(editTxn.amount) : "");
+  const [currency, setCurrency] = useState(editTxn?.currency || "LKR");
+  const [category, setCategory] = useState(editTxn?.category || prefill?.category || incomeCats[0] || "");
+  const [room, setRoom] = useState(editTxn?.room || prefill?.room || "");
+  const [roomStatus, setRoomStatus] = useState(() => {
+    const rno = editTxn?.room || prefill?.room;
+    if (!rno) return "";
+    const cur = rooms.find((x) => x.no === rno);
+    return cur && cur.status !== "vacant" ? cur.status : "checkin";
+  });
+  const [method, setMethod] = useState(() => (editTxn && CARD_PROVIDERS.includes(editTxn.method) ? "Card" : editTxn?.method || "Cash"));
+  const [cardProvider, setCardProvider] = useState(() => (editTxn && CARD_PROVIDERS.includes(editTxn.method) ? editTxn.method : CARD_PROVIDERS[0]));
+  const [date, setDate] = useState(editTxn?.date || todayStr());
+  const [note, setNote] = useState(editTxn?.note || "");
+  const [status, setStatus] = useState(editTxn?.status || "paid");
+  const [saving, setSaving] = useState(false);
+  const cats = type === "income" ? incomeCats : expenseCats;
+
+  const pickRoom = (r) => {
+    if (room === r) { setRoom(""); setRoomStatus(""); return; }
+    setRoom(r);
+    const cur = rooms.find((x) => x.no === r);
+    setRoomStatus(cur && cur.status !== "vacant" ? cur.status : "checkin");
+  };
+  const switchType = (t) => { setType(t); setCategory(t === "income" ? incomeCats[0] : expenseCats[0]); setRoom(""); setRoomStatus(""); };
+  const valid = Number(amount) > 0 && category;
+  const finalMethod = method === "Card" ? cardProvider : method;
+
+  const submit = async () => {
+    setSaving(true);
+    await onSave({ id: editTxn?.id, type, amount: Number(amount), currency, category, room: room || undefined, roomStatus: room ? roomStatus : undefined, method: finalMethod, date, note, status });
+    setSaving(false);
+  };
+
+  return (
+    <div className="px-4 pb-6">
+      <h2 className="text-lg font-semibold text-slate-800 mt-4 mb-3">{editTxn ? "Edit entry" : "New entry"}</h2>
+      {editTxn && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          Editing a saved entry is recorded and visible to everyone as "Edited," including what changed.
+        </p>
+      )}
+      <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-4">
+        <button onClick={() => switchType("income")} className={"flex-1 py-2.5 text-sm font-medium " + (type === "income" ? "bg-emerald-600 text-white" : "bg-white text-slate-600")}>Income</button>
+        <button onClick={() => switchType("expense")} className={"flex-1 py-2.5 text-sm font-medium " + (type === "expense" ? "bg-rose-600 text-white" : "bg-white text-slate-600")}>Expense</button>
+      </div>
+
+      <label className="block text-xs text-slate-500 mb-1">Currency</label>
+      <div className="flex gap-2 mb-2 flex-wrap">
+        {CURRENCIES.map((c) => (
+          <button key={c} onClick={() => setCurrency(c)} className={"px-3 py-1.5 rounded-full text-xs font-medium border " + (currency === c ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{c}</button>
+        ))}
+      </div>
+
+      <label className="block text-xs text-slate-500 mb-1">Amount ({currency})</label>
+      <input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0"
+        className="w-full text-2xl font-semibold border border-slate-200 rounded-lg px-3 py-2.5 mb-4 focus:outline-none focus:ring-2 focus:ring-teal-600 tabular-nums" />
+
+      <label className="block text-xs text-slate-500 mb-1">Category — type to search or add new</label>
+      <CategoryPicker value={category} onChange={setCategory} options={cats} onAddNew={(name) => onAddCategory(type, name)} />
+
+      {type === "income" && isRoomCat(category) && (
+        <>
+          <label className="block text-xs text-slate-500 mb-1">Room number</label>
+          <div className="flex gap-2 mb-4 flex-wrap">
+            {roomNos.map((r) => (
+              <button key={r} onClick={() => pickRoom(r)} className={"w-12 py-1.5 rounded-lg text-xs font-semibold border " + (room === r ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{r}</button>
+            ))}
+          </div>
+          {room && (
+            <>
+              <label className="block text-xs text-slate-500 mb-1">Guest status — updates the rooms board</label>
+              <div className="flex gap-2 mb-4">
+                <button onClick={() => setRoomStatus("checkin")} className={"flex-1 py-2 rounded-lg text-xs font-medium border " + (roomStatus === "checkin" ? "bg-sky-600 text-white border-sky-600" : "bg-white text-slate-600 border-slate-200")}>Check-in</button>
+                <button onClick={() => setRoomStatus("staying")} className={"flex-1 py-2 rounded-lg text-xs font-medium border " + (roomStatus === "staying" ? "bg-teal-600 text-white border-teal-600" : "bg-white text-slate-600 border-slate-200")}>Staying</button>
+                <button onClick={() => setRoomStatus("checkout")} className={"flex-1 py-2 rounded-lg text-xs font-medium border " + (roomStatus === "checkout" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-200")}>Check-out</button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      <label className="block text-xs text-slate-500 mb-1">Payment method</label>
+      <div className="flex gap-2 mb-3 flex-wrap">
+        {PAY_METHODS.map((m) => (
+          <button key={m} onClick={() => setMethod(m)} className={"px-3 py-1.5 rounded-full text-xs font-medium border " + (method === m ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{m}</button>
+        ))}
+      </div>
+      {method === "Card" && (
+        <>
+          <label className="block text-xs text-slate-500 mb-1">Card provider</label>
+          <select value={cardProvider} onChange={(e) => setCardProvider(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2.5 mb-4 text-sm bg-white">
+            {CARD_PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </>
+      )}
+
+      <label className="block text-xs text-slate-500 mb-1">Payment status</label>
+      <div className="flex gap-2 mb-4">
+        <button onClick={() => setStatus("paid")} className={"px-3 py-1.5 rounded-full text-xs font-medium border " + (status === "paid" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{type === "income" ? "Received" : "Paid"}</button>
+        <button onClick={() => setStatus("pending")} className={"px-3 py-1.5 rounded-full text-xs font-medium border " + (status === "pending" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-200")}>Pending</button>
+      </div>
+      {status === "pending" && (
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          {type === "income" ? "This will show as a receivable until you mark it paid." : "This will show as a payable until you mark it paid."}
+        </p>
+      )}
+
+      <label className="block text-xs text-slate-500 mb-1">Date</label>
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 mb-4 text-sm bg-white" />
+
+      <label className="block text-xs text-slate-500 mb-1">Note (optional)</label>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="2 nights, incl. breakfast"
+        className="w-full border border-slate-200 rounded-lg px-3 py-2.5 mb-6 text-sm" />
+
+      <div className="flex gap-3">
+        <button onClick={onCancel} className="flex-1 py-3 rounded-lg border border-slate-200 text-sm font-medium text-slate-600">Cancel</button>
+        <button disabled={!valid || saving} onClick={submit} className={"flex-1 py-3 rounded-lg text-sm font-semibold text-white " + (valid && !saving ? "bg-teal-700" : "bg-slate-300")}>
+          {saving ? "Saving…" : editTxn ? "Save changes" : "Save entry"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RoomEditor({ room, onSave, onAddIncome, onClose }) {
+  const [status, setStatus] = useState(room.status);
+  const [guest, setGuest] = useState(room.guest || "");
+  const [out, setOut] = useState(room.out || "");
+  useEffect(() => { setStatus(room.status); setGuest(room.guest || ""); setOut(room.out || ""); }, [room.no]);
+  const save = () => onSave({ ...room, status, guest: status === "vacant" ? "" : guest, out: status === "vacant" ? "" : out });
+  return (
+    <div className="bg-white rounded-xl border border-teal-300 p-4 mt-3">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-slate-800">Room {room.no}</h2>
+        <button onClick={onClose} className="text-slate-400 text-xs" aria-label="Close editor">✕</button>
+      </div>
+      <label className="block text-xs text-slate-500 mb-1">Status</label>
+      <div className="flex gap-2 mb-3 flex-wrap">
+        {ROOM_STATUSES.map((s) => (
+          <button key={s.id} onClick={() => setStatus(s.id)} className={"px-3 py-1.5 rounded-full text-xs font-medium border " + (status === s.id ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{s.label}</button>
+        ))}
+      </div>
+      {status !== "vacant" && (
+        <>
+          <label className="block text-xs text-slate-500 mb-1">Guest name</label>
+          <input value={guest} onChange={(e) => setGuest(e.target.value)} placeholder="Guest name" className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm" />
+          <label className="block text-xs text-slate-500 mb-1">Check-out date</label>
+          <input type="date" value={out} onChange={(e) => setOut(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm bg-white" />
+        </>
+      )}
+      <div className="flex gap-2">
+        <button onClick={save} className="flex-1 py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save</button>
+        <button onClick={() => onAddIncome(room.no)} className="flex-1 py-2.5 rounded-lg border border-teal-300 text-teal-700 text-sm font-semibold">Add room income</button>
+      </div>
+    </div>
+  );
+}
+
+function BudgetEditor({ budgets, onSave, expenseCats }) {
+  const [draft, setDraft] = useState(budgets);
+  const [show, setShow] = useState(false);
+  useEffect(() => setDraft(budgets), [budgets]);
+  const set = (cat, v) => setDraft({ ...draft, [cat]: v === "" ? "" : Number(v) });
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-slate-800">Monthly budgets</h2>
+        <button onClick={() => setShow(!show)} className="text-xs text-teal-700 font-medium">{show ? "Hide" : "Edit"}</button>
+      </div>
+      <p className="text-xs text-slate-500 mt-1">{show ? "Set a monthly limit per expense category. Leave blank for no limit." : Object.keys(budgets).length + " budget(s) set"}</p>
+      {show && (
+        <>
+          <div className="mt-3">
+            {expenseCats.map((c) => (
+              <div key={c} className="flex items-center gap-3 mb-2">
+                <span className="text-xs text-slate-600 flex-1">{c}</span>
+                <input type="number" inputMode="numeric" value={draft[c] ?? ""} onChange={(e) => set(c, e.target.value)} placeholder="No limit"
+                  className="w-32 border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-right tabular-nums" />
+              </div>
+            ))}
+          </div>
+          <button onClick={() => onSave(Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== "" && v > 0)))}
+            className="mt-2 w-full py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save budgets</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [view, setView] = useState("dashboard");
+  const [txns, setTxns] = useState([]);
+  const [histories, setHistories] = useState({});
+  const [rooms, setRooms] = useState([]);
+  const [budgets, setBudgets] = useState({});
+  const [incomeCats, setIncomeCats] = useState([]);
+  const [expenseCats, setExpenseCats] = useState([]);
+  const [adminPin, setAdminPin] = useState("0105");
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [savedMsg, setSavedMsg] = useState("");
+  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [addPrefill, setAddPrefill] = useState(null);
+  const [editingTxn, setEditingTxn] = useState(null);
+  const [roomListDraft, setRoomListDraft] = useState("");
+  const [reportTab, setReportTab] = useState("daily");
+  const [reportDate, setReportDate] = useState(todayStr());
+  const [role, setRole] = useState("staff");
+  const [pinInput, setPinInput] = useState("");
+  const [showUnlock, setShowUnlock] = useState(false);
+  const [pinError, setPinError] = useState(false);
+  const [newPin, setNewPin] = useState("");
+
+  const flash = (m) => { setSavedMsg(m); setTimeout(() => setSavedMsg(""), 2000); };
+
+  const loadAll = useCallback(async () => {
+    setLoadError("");
+    const [txnsRes, histRes, roomsRes, catsRes, budgetsRes, settingsRes] = await Promise.all([
+      supabase.from("transactions").select("*").order("txn_date", { ascending: false }).order("created_at", { ascending: false }),
+      supabase.from("transaction_history").select("*").order("changed_at", { ascending: true }),
+      supabase.from("rooms").select("*").order("no", { ascending: true }),
+      supabase.from("categories").select("*").order("id", { ascending: true }),
+      supabase.from("budgets").select("*"),
+      supabase.from("settings").select("*"),
+    ]);
+    const firstError = [txnsRes, histRes, roomsRes, catsRes, budgetsRes, settingsRes].find((r) => r.error);
+    if (firstError) { setLoadError(firstError.error.message); setLoaded(true); return; }
+
+    setTxns(txnsRes.data.map(rowToTxn));
+    const hg = {};
+    for (const h of histRes.data) (hg[h.transaction_id] ||= []).push(h);
+    setHistories(hg);
+    setRooms(roomsRes.data.map(rowToRoom));
+    setRoomListDraft(roomsRes.data.map((r) => r.no).join(", "));
+    setIncomeCats(catsRes.data.filter((c) => c.type === "income").map((c) => c.name));
+    setExpenseCats(catsRes.data.filter((c) => c.type === "expense").map((c) => c.name));
+    setBudgets(Object.fromEntries(budgetsRes.data.map((b) => [b.category, Number(b.monthly_limit)])));
+    const pin = settingsRes.data.find((s) => s.key === "admin_pin");
+    if (pin) setAdminPin(pin.value);
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  // ---- mutations ----
+  const tryUnlock = () => {
+    if (pinInput === adminPin) { setRole("admin"); setShowUnlock(false); setPinInput(""); setPinError(false); }
+    else { setPinError(true); setPinInput(""); }
+  };
+  const lockToStaff = () => { setRole("staff"); setView("dashboard"); setSelectedRoom(null); };
+  const savePin = async () => {
+    const p = newPin.trim();
+    if (!/^\d{4,6}$/.test(p)) { flash("PIN must be 4–6 digits"); return; }
+    const { error } = await supabase.from("settings").upsert({ key: "admin_pin", value: p });
+    if (error) { flash("Error: " + error.message); return; }
+    setAdminPin(p); setNewPin(""); flash("Admin PIN updated");
+  };
+
+  const FIELD_LABELS = { amount: "amount", currency: "currency", category: "category", room: "room", method: "method", date: "date", note: "note", status: "payment status" };
+  const describeChanges = (before, after) => {
+    const parts = [];
+    for (const k of Object.keys(FIELD_LABELS)) {
+      const b = before[k] ?? ""; const a = after[k] ?? "";
+      if (String(b) !== String(a)) {
+        const fv = (v) => (k === "amount" ? fmt(Number(v) || 0) : String(v) || "—");
+        parts.push(FIELD_LABELS[k] + " " + fv(b) + " → " + fv(a));
+      }
+    }
+    return parts.length ? parts.join("; ") : "no field changes";
+  };
+
+  const addTxn = async (t) => {
+    const { roomStatus, id, ...fields } = t;
+    const dbFields = { type: fields.type, amount: fields.amount, currency: fields.currency || "LKR", category: fields.category, room: fields.room || null, method: fields.method, txn_date: fields.date, note: fields.note || null, status: fields.status };
+
+    if (id) {
+      const before = txns.find((x) => x.id === id);
+      const summary = describeChanges(before, fields);
+      const { error: upErr } = await supabase.from("transactions").update({ ...dbFields, edited: true }).eq("id", id);
+      if (upErr) { flash("Error saving: " + upErr.message); return; }
+      const { error: histErr } = await supabase.from("transaction_history").insert({ transaction_id: id, changed_by: role, summary });
+      if (histErr) { flash("Error logging history: " + histErr.message); }
+    } else {
+      const { error } = await supabase.from("transactions").insert({ ...dbFields, entered_by: role });
+      if (error) { flash("Error saving: " + error.message); return; }
+    }
+
+    if (fields.room && roomStatus) {
+      const cur = rooms.find((r) => r.no === fields.room);
+      await supabase.from("rooms").update({
+        status: roomStatus,
+        guest: roomStatus === "vacant" ? "" : cur?.guest || "",
+        checkout_date: roomStatus === "vacant" ? null : cur?.out || null,
+      }).eq("no", fields.room);
+    }
+
+    await loadAll();
+    setAddPrefill(null); setEditingTxn(null);
+    setView(role === "admin" ? "dashboard" : "transactions");
+  };
+
+  const deleteTxn = async (id) => {
+    const { error } = await supabase.from("transactions").delete().eq("id", id);
+    if (error) { flash("Error deleting: " + error.message); return; }
+    await loadAll();
+  };
+  const markPaid = async (id) => {
+    const { error } = await supabase.from("transactions").update({ status: "paid" }).eq("id", id);
+    if (error) { flash("Error: " + error.message); return; }
+    await loadAll();
+  };
+  const saveRoom = async (updated) => {
+    const { error } = await supabase.from("rooms").update({
+      status: updated.status, guest: updated.guest || "", checkout_date: updated.out || null,
+    }).eq("no", updated.no);
+    if (error) { flash("Error: " + error.message); return; }
+    await loadAll();
+    setSelectedRoom(null);
+  };
+  const addIncomeForRoom = (no) => { setAddPrefill({ category: "Room – Walk-in", room: no }); setSelectedRoom(null); setView("add"); };
+  const saveRoomList = async () => {
+    const nos = roomListDraft.split(",").map((s) => s.trim()).filter(Boolean);
+    if (nos.length === 0) return;
+    const existing = new Set(rooms.map((r) => r.no));
+    const toAdd = nos.filter((n) => !existing.has(n));
+    const toRemove = [...existing].filter((n) => !nos.includes(n));
+    if (toAdd.length) await supabase.from("rooms").insert(toAdd.map((no) => ({ no })));
+    if (toRemove.length) await supabase.from("rooms").delete().in("no", toRemove);
+    await loadAll();
+    flash("Room list saved");
+  };
+  const addCategory = async (type, name) => {
+    const list = type === "income" ? incomeCats : expenseCats;
+    if (list.some((c) => c.toLowerCase() === name.toLowerCase())) return;
+    const { error } = await supabase.from("categories").insert({ type, name });
+    if (error) { flash("Error: " + error.message); return; }
+    await loadAll();
+  };
+  const removeCategory = async (type, name) => {
+    const { error } = await supabase.from("categories").delete().match({ type, name });
+    if (error) { flash("Error: " + error.message); return; }
+    await loadAll();
+  };
+  const saveBudgets = async (b) => {
+    await supabase.from("budgets").delete().neq("category", "___none___");
+    const rows = Object.entries(b).map(([category, monthly_limit]) => ({ category, monthly_limit }));
+    if (rows.length) await supabase.from("budgets").insert(rows);
+    await loadAll();
+    flash("Budgets saved");
+  };
+
+  // ---- derived data ----
+  const today = todayStr();
+  const month = today.slice(0, 7);
+
+  const stats = useMemo(() => {
+    let ti = 0, te = 0, mi = 0, me = 0, recv = 0, pay = 0, bcomToday = 0, bcomMonth = 0, bcomAll = 0;
+    const fx = {}; // { USD: { today: {in,out}, month: {in,out} }, ... }
+    for (const t of txns) {
+      const v = Number(t.amount) || 0;
+      const cur = t.currency || "LKR";
+      const paid = t.status !== "pending";
+      if (!paid) { if (cur === "LKR") { t.type === "income" ? (recv += v) : (pay += v); } continue; }
+
+      if (cur !== "LKR") {
+        if (!fx[cur]) fx[cur] = { today: { in: 0, out: 0 }, month: { in: 0, out: 0 } };
+        if (t.date === today) t.type === "income" ? (fx[cur].today.in += v) : (fx[cur].today.out += v);
+        if (t.date && t.date.startsWith(month)) t.type === "income" ? (fx[cur].month.in += v) : (fx[cur].month.out += v);
+        continue;
+      }
+
+      const bcom = t.type === "income" && t.category === BCOM_CAT ? v * BCOM_RATE : 0;
+      bcomAll += bcom;
+      if (t.date === today) { t.type === "income" ? (ti += v) : (te += v); bcomToday += bcom; }
+      if (t.date && t.date.startsWith(month)) { t.type === "income" ? (mi += v) : (me += v); bcomMonth += bcom; }
+    }
+    return { ti, te, mi, me, recv, pay, bcomToday, bcomMonth, bcomAll, fx };
+  }, [txns]);
+
+  const roomStats = useMemo(() => {
+    const occupied = rooms.filter((r) => r.status === "staying" || r.status === "checkin").length;
+    const arrivals = rooms.filter((r) => r.status === "checkin").length;
+    const departures = rooms.filter((r) => r.status === "checkout").length;
+    return { occupied, arrivals, departures, total: rooms.length };
+  }, [rooms]);
+
+  const monthExpenseByCat = useMemo(() => {
+    const map = {};
+    for (const t of txns) {
+      if (t.type !== "expense" || t.status === "pending") continue;
+      if ((t.currency || "LKR") !== "LKR") continue;
+      if (!t.date || !t.date.startsWith(month)) continue;
+      map[t.category] = (map[t.category] || 0) + Number(t.amount);
+    }
+    return map;
+  }, [txns]);
+
+  const budgetAlerts = useMemo(() => {
+    const alerts = [];
+    for (const [cat, limit] of Object.entries(budgets)) {
+      const spent = monthExpenseByCat[cat] || 0;
+      if (!limit) continue;
+      const pct = (spent / limit) * 100;
+      if (pct >= 100) alerts.push({ level: "over", text: cat + " over budget — " + fmt(spent) + " of " + fmt(limit) });
+      else if (pct >= 80) alerts.push({ level: "warn", text: cat + " at " + Math.round(pct) + "% of budget (" + fmt(spent) + " / " + fmt(limit) + ")" });
+    }
+    return alerts;
+  }, [budgets, monthExpenseByCat]);
+
+  const dayReport = useMemo(() => {
+    const inc = {}, exp = {}, methods = {}, fx = {};
+    let ti = 0, te = 0, pendCount = 0, bcom = 0;
+    for (const t of txns) {
+      if (t.date !== reportDate) continue;
+      const v = Number(t.amount) || 0;
+      const cur = t.currency || "LKR";
+      if (t.status === "pending") { pendCount++; continue; }
+      if (cur !== "LKR") {
+        if (!fx[cur]) fx[cur] = { in: 0, out: 0 };
+        t.type === "income" ? (fx[cur].in += v) : (fx[cur].out += v);
+        continue;
+      }
+      if (t.type === "income") { inc[t.category] = (inc[t.category] || 0) + v; ti += v; if (t.category === BCOM_CAT) bcom += v * BCOM_RATE; }
+      else { exp[t.category] = (exp[t.category] || 0) + v; te += v; }
+      if (!methods[t.method]) methods[t.method] = { in: 0, out: 0 };
+      t.type === "income" ? (methods[t.method].in += v) : (methods[t.method].out += v);
+    }
+    const sort = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]);
+    return { inc: sort(inc), exp: sort(exp), ti, te, bcom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
+  }, [txns, reportDate]);
+
+  const monthByCat = useMemo(() => {
+    const map = {};
+    for (const t of txns) {
+      if (!t.date || !t.date.startsWith(month) || t.status === "pending") continue;
+      if ((t.currency || "LKR") !== "LKR") continue;
+      const k = t.type + "|" + t.category;
+      map[k] = (map[k] || 0) + Number(t.amount);
+    }
+    return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
+  }, [txns]);
+
+  const filtered = useMemo(() => {
+    if (filter === "all") return txns;
+    if (filter === "pending") return txns.filter((t) => t.status === "pending");
+    return txns.filter((t) => t.type === filter);
+  }, [txns, filter]);
+
+  const maxCat = Math.max(1, ...monthByCat.map((c) => c.total));
+  const hasCustomView = incomeCats.length + expenseCats.length > 0;
+
+  const Nav = ({ id, label, icon }) => (
+    <button onClick={() => { setView(id); if (id !== "rooms") setSelectedRoom(null); }} className={"flex-1 flex flex-col items-center gap-0.5 py-2 text-[11px] " + (view === id ? "text-teal-700 font-semibold" : "text-slate-400")}>
+      <span className="text-base leading-none" aria-hidden="true">{icon}</span>{label}
+    </button>
+  );
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="max-w-sm bg-white border border-rose-200 rounded-xl p-4 text-sm">
+          <p className="font-semibold text-rose-700 mb-1">Couldn't reach the database</p>
+          <p className="text-slate-600 mb-3">{loadError}</p>
+          <p className="text-xs text-slate-400">Check your .env file has the correct VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, and that the schema SQL has been run.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex justify-center" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <div className="w-full max-w-md bg-slate-50 min-h-screen flex flex-col relative">
+
+        <header className="bg-white pt-4 pb-0 sticky top-0 z-10">
+          <div className="px-4 flex items-center justify-between pb-3">
+            <div>
+              <div className="text-base font-bold text-teal-900 tracking-tight">Beach &amp; Bliss</div>
+              <div className="text-[11px] uppercase tracking-widest text-teal-700/70">Mirissa · finance</div>
+            </div>
+            <div className="flex items-center gap-2">
+              {role === "staff" ? (
+                <button onClick={() => { setShowUnlock(true); setPinError(false); setPinInput(""); }} className="text-[11px] font-medium text-slate-500 border border-slate-200 rounded-full px-3 py-1.5">Staff · unlock admin</button>
+              ) : (
+                <button onClick={lockToStaff} className="text-[11px] font-medium text-teal-800 bg-teal-50 border border-teal-200 rounded-full px-3 py-1.5">Admin · lock</button>
+              )}
+              {view !== "add" && (
+                <button onClick={() => { setAddPrefill(null); setEditingTxn(null); setView("add"); }} className="bg-teal-700 text-white text-sm font-semibold px-4 py-2 rounded-lg">+ Add</button>
+              )}
+            </div>
+          </div>
+          <Wave />
+        </header>
+
+        <main className="flex-1 pb-20">
+          {!loaded && <div className="p-6 text-sm text-slate-400">Loading…</div>}
+
+          {loaded && showUnlock && role === "staff" && (
+            <div className="px-4 pt-4">
+              <div className="bg-white rounded-xl border border-teal-300 p-4 mb-3">
+                <h2 className="text-sm font-semibold text-slate-800 mb-1">Admin unlock</h2>
+                <p className="text-xs text-slate-500 mb-3">Enter the admin PIN to view totals, entries, reports, and settings.</p>
+                <input type="password" inputMode="numeric" autoFocus value={pinInput} onChange={(e) => setPinInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && tryUnlock()} placeholder="PIN"
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2.5 mb-2 text-center text-lg tracking-widest" />
+                {pinError && <p className="text-xs text-rose-600 mb-2 text-center">Wrong PIN. Try again.</p>}
+                <div className="flex gap-2">
+                  <button onClick={() => setShowUnlock(false)} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-sm font-medium text-slate-600">Cancel</button>
+                  <button onClick={tryUnlock} className="flex-1 py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Unlock</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {loaded && view === "dashboard" && role === "staff" && !showUnlock && (
+            <div className="px-4 pt-4">
+              <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3 text-center">
+                <p className="text-sm text-slate-600 mb-3">Log payments and expenses as they happen.</p>
+                <button onClick={() => { setAddPrefill(null); setEditingTxn(null); setView("add"); }} className="w-full py-3.5 rounded-lg bg-teal-700 text-white text-base font-semibold mb-2">+ New entry</button>
+                <p className="text-xs text-slate-400">{txns.filter((t) => t.date === today).length} entr{txns.filter((t) => t.date === today).length === 1 ? "y" : "ies"} recorded today</p>
+              </div>
+              <button onClick={() => setView("rooms")} className="w-full bg-white rounded-xl border border-slate-200 p-3 flex items-center justify-between text-left">
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Rooms</div>
+                  <div className="text-sm font-semibold text-slate-800">{roomStats.occupied}/{roomStats.total} occupied</div>
+                </div>
+                <div className="flex gap-2 text-[11px]">
+                  {roomStats.arrivals > 0 && <span className="bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2 py-1 font-medium">{roomStats.arrivals} arriving</span>}
+                  {roomStats.departures > 0 && <span className="bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-1 font-medium">{roomStats.departures} checking out</span>}
+                  <span className="text-teal-700 font-semibold self-center">→</span>
+                </div>
+              </button>
+            </div>
+          )}
+
+          {loaded && view === "dashboard" && role === "admin" && (
+            <div className="px-4 pt-4">
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <StatCard label="Today's income" value={fmt(stats.ti)} tone="up" />
+                <StatCard label="Today's expenses" value={fmt(stats.te)} tone="down" />
+                <StatCard label="Net today (after B.com 18%)" value={fmt(stats.ti - stats.te - stats.bcomToday)} />
+                <StatCard label="Month net (after B.com 18%)" value={fmt(stats.mi - stats.me - stats.bcomMonth)} />
+              </div>
+
+              {stats.bcomAll > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3">
+                  <div className="text-xs text-slate-500 mb-1.5">Booking.com commission accrued (18%)</div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Today</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.bcomToday)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">This month</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.bcomMonth)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Total accrued</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.bcomAll)}</div></div>
+                  </div>
+                </div>
+              )}
+
+              {Object.keys(stats.fx).length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                  <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency (this month, not converted)</h2>
+                  {Object.entries(stats.fx).map(([cur, v]) => (
+                    <div key={cur} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
+                      <span className="font-semibold text-indigo-700">{cur}</span>
+                      <span className="text-emerald-700 tabular-nums">+{fmtCur(v.month.in, cur).replace(/^\D+\s?/, "")}</span>
+                      <span className="text-rose-700 tabular-nums">−{fmtCur(v.month.out, cur).replace(/^\D+\s?/, "")}</span>
+                      <span className="font-semibold tabular-nums">{fmtCur(v.month.in - v.month.out, cur).replace(/^\D+\s?/, "")}</span>
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-slate-400 mt-1.5">Kept separate from LKR totals above — no exchange rate applied.</p>
+                </div>
+              )}
+
+              <button onClick={() => setView("rooms")} className="w-full bg-white rounded-xl border border-slate-200 p-3 mb-3 flex items-center justify-between text-left">
+                <div>
+                  <div className="text-xs text-slate-500 mb-0.5">Rooms</div>
+                  <div className="text-sm font-semibold text-slate-800">{roomStats.occupied}/{roomStats.total} occupied</div>
+                </div>
+                <div className="flex gap-2 text-[11px]">
+                  {roomStats.arrivals > 0 && <span className="bg-sky-50 text-sky-700 border border-sky-200 rounded-full px-2 py-1 font-medium">{roomStats.arrivals} arriving</span>}
+                  {roomStats.departures > 0 && <span className="bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2 py-1 font-medium">{roomStats.departures} checking out</span>}
+                  <span className="text-teal-700 font-semibold self-center">→</span>
+                </div>
+              </button>
+
+              {(budgetAlerts.length > 0 || stats.recv > 0 || stats.pay > 0) && (
+                <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                  <h2 className="text-sm font-semibold text-slate-800 mb-2">Alerts</h2>
+                  {budgetAlerts.map((a, i) => (
+                    <div key={i} className={"text-xs rounded-lg px-3 py-2 mb-2 border " + (a.level === "over" ? "bg-rose-50 text-rose-700 border-rose-200" : "bg-amber-50 text-amber-700 border-amber-200")}>{a.text}</div>
+                  ))}
+                  {stats.recv > 0 && (
+                    <button onClick={() => { setFilter("pending"); setView("transactions"); }} className="w-full text-left text-xs rounded-lg px-3 py-2 mb-2 border bg-sky-50 text-sky-700 border-sky-200">Receivables pending: {fmt(stats.recv)} — tap to view</button>
+                  )}
+                  {stats.pay > 0 && (
+                    <button onClick={() => { setFilter("pending"); setView("transactions"); }} className="w-full text-left text-xs rounded-lg px-3 py-2 border bg-amber-50 text-amber-700 border-amber-200">Payables pending: {fmt(stats.pay)} — tap to view</button>
+                  )}
+                </div>
+              )}
+
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <h2 className="text-sm font-semibold text-slate-800">Recent activity</h2>
+                  <button onClick={() => { setFilter("all"); setView("transactions"); }} className="text-xs text-teal-700 font-medium">View all</button>
+                </div>
+                {txns.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-6 text-center">No entries yet. Add your first income or expense.</p>
+                ) : txns.slice(0, 5).map((t) => <TxnRow key={t.id} t={t} onMarkPaid={markPaid} history={histories[t.id]} />)}
+              </div>
+            </div>
+          )}
+
+          {loaded && view === "rooms" && (
+            <div className="px-4 pt-4">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-slate-800">Rooms — {roomStats.occupied}/{roomStats.total} occupied</h2>
+                <div className="flex gap-2 text-[10px]">
+                  <span className="flex items-center gap-1 text-sky-700"><span className="w-2 h-2 rounded-full bg-sky-400 inline-block" />In</span>
+                  <span className="flex items-center gap-1 text-teal-700"><span className="w-2 h-2 rounded-full bg-teal-400 inline-block" />Staying</span>
+                  <span className="flex items-center gap-1 text-amber-700"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />Out</span>
+                </div>
+              </div>
+              {[...new Set(rooms.map((r) => r.no[0]))].map((floor) => (
+                <div key={floor} className="mb-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Floor {floor}</div>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {rooms.filter((r) => r.no[0] === floor).map((r) => (
+                      <button key={r.no} onClick={() => setSelectedRoom(r.no)}
+                        className={"rounded-lg border p-1.5 text-left min-h-[64px] " + STATUS_STYLE[r.status] + (selectedRoom === r.no ? " ring-2 ring-teal-500" : "")}>
+                        <div className="text-sm font-bold leading-none mb-1">{r.no}</div>
+                        <div className="text-[9px] font-medium uppercase tracking-wide">{ROOM_STATUSES.find((s) => s.id === r.status)?.label}</div>
+                        {r.guest && <div className="text-[9px] truncate mt-0.5 opacity-80">{r.guest}</div>}
+                        {r.out && r.status !== "vacant" && <div className="text-[9px] mt-0.5 opacity-60">out {r.out.slice(5)}</div>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {selectedRoom && <RoomEditor room={rooms.find((r) => r.no === selectedRoom)} onSave={saveRoom} onAddIncome={addIncomeForRoom} onClose={() => setSelectedRoom(null)} />}
+            </div>
+          )}
+
+          {loaded && view === "transactions" && role === "admin" && (
+            <div className="px-4 pt-4">
+              <div className="flex gap-2 mb-3 flex-wrap">
+                {["all", "income", "expense", "pending"].map((f) => (
+                  <button key={f} onClick={() => setFilter(f)} className={"px-3 py-1.5 rounded-full text-xs font-medium border capitalize " + (filter === f ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{f}</button>
+                ))}
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 px-4 py-1">
+                {filtered.length === 0 ? (
+                  <p className="text-sm text-slate-400 py-8 text-center">Nothing here yet</p>
+                ) : filtered.map((t) => <TxnRow key={t.id} t={t} onDelete={deleteTxn} onMarkPaid={markPaid} history={histories[t.id]} onEdit={(id) => { setEditingTxn(txns.find((x) => x.id === id)); setView("add"); }} />)}
+              </div>
+            </div>
+          )}
+
+          {loaded && view === "transactions" && role === "staff" && !showUnlock && (
+            <div className="px-4 pt-4">
+              <p className="text-xs text-slate-500 mb-3">Entries for today, so you can check what's already been logged and confirm your own entries are correct.</p>
+              <div className="bg-white rounded-xl border border-slate-200 px-4 py-1">
+                {txns.filter((t) => t.date === today).length === 0 ? (
+                  <p className="text-sm text-slate-400 py-8 text-center">Nothing logged today yet</p>
+                ) : txns.filter((t) => t.date === today).map((t) => (
+                  <TxnRow key={t.id} t={t} onMarkPaid={markPaid} history={histories[t.id]} onEdit={(id) => { setEditingTxn(txns.find((x) => x.id === id)); setView("add"); }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {loaded && view === "add" && (
+            <AddForm onSave={addTxn} onCancel={() => { setAddPrefill(null); setEditingTxn(null); setView(role === "admin" ? "dashboard" : "transactions"); }}
+              rooms={rooms} prefill={addPrefill} editTxn={editingTxn} incomeCats={incomeCats} expenseCats={expenseCats} onAddCategory={addCategory} />
+          )}
+
+          {loaded && view === "reports" && role === "admin" && (
+            <div className="px-4 pt-4">
+              <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
+                <button onClick={() => setReportTab("daily")} className={"flex-1 py-2 text-sm font-medium " + (reportTab === "daily" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>Daily</button>
+                <button onClick={() => setReportTab("monthly")} className={"flex-1 py-2 text-sm font-medium " + (reportTab === "monthly" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>Monthly</button>
+              </div>
+
+              {reportTab === "daily" && (
+                <>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input type="date" value={reportDate} onChange={(e) => setReportDate(e.target.value)} className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                    {reportDate !== today && <button onClick={() => setReportDate(today)} className="text-xs text-teal-700 font-medium border border-teal-200 rounded-lg px-3 py-2">Today</button>}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    <StatCard label="Income" value={fmt(dayReport.ti)} tone="up" />
+                    <StatCard label="Expenses" value={fmt(dayReport.te)} tone="down" />
+                    <StatCard label="Net (after B.com)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom)} />
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                    <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
+                    {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map(([cat, v]) => (
+                      <div key={cat} className="flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
+                        <span className="text-slate-600">{cat}</span><span className="font-semibold tabular-nums text-emerald-700">{fmt(v)}</span>
+                      </div>
+                    ))}
+                    {dayReport.inc.length > 0 && (
+                      <>
+                        <div className="flex justify-between text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                          <span className="text-slate-800">Total income</span><span className="tabular-nums text-emerald-700">{fmt(dayReport.ti)}</span>
+                        </div>
+                        {dayReport.bcom > 0 && (
+                          <>
+                            <div className="flex justify-between text-xs pt-1.5">
+                              <span className="text-orange-700">Less: Booking.com commission (18%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.bcom)}</span>
+                            </div>
+                            <div className="flex justify-between text-xs pt-1.5 font-semibold">
+                              <span className="text-slate-800">Income after commission</span><span className="tabular-nums text-emerald-800">{fmt(dayReport.ti - dayReport.bcom)}</span>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                    <h2 className="text-sm font-semibold text-rose-700 mb-2">Expenses by category</h2>
+                    {dayReport.exp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses recorded for this day</p> : dayReport.exp.map(([cat, v]) => (
+                      <div key={cat} className="flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
+                        <span className="text-slate-600">{cat}</span><span className="font-semibold tabular-nums text-rose-700">{fmt(v)}</span>
+                      </div>
+                    ))}
+                    {dayReport.exp.length > 0 && (
+                      <div className="flex justify-between text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                        <span className="text-slate-800">Total expenses</span><span className="tabular-nums text-rose-700">{fmt(dayReport.te)}</span>
+                      </div>
+                    )}
+                  </div>
+                  {dayReport.methods.length > 0 && (
+                    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                      <h2 className="text-sm font-semibold text-slate-800 mb-2">By payment method</h2>
+                      <div className="grid grid-cols-4 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                        <span>Method</span><span className="text-right">In</span><span className="text-right">Out</span><span className="text-right">Net</span>
+                      </div>
+                      {dayReport.methods.map(([m, v]) => (
+                        <div key={m} className="grid grid-cols-4 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                          <span className="text-slate-600">{m}</span>
+                          <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
+                          <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
+                          <span className="text-right tabular-nums font-semibold">{fmt(v.in - v.out)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {dayReport.pendCount > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">{dayReport.pendCount} pending entr{dayReport.pendCount === 1 ? "y" : "ies"} on this date excluded until marked paid.</p>
+                  )}
+                  {dayReport.fx.length > 0 && (
+                    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                      <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency this day (not converted)</h2>
+                      {dayReport.fx.map(([cur, v]) => (
+                        <div key={cur} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
+                          <span className="font-semibold text-indigo-700">{cur}</span>
+                          <span className="text-emerald-700 tabular-nums">+{fmtCur(v.in, cur).replace(/^\D+\s?/, "")}</span>
+                          <span className="text-rose-700 tabular-nums">−{fmtCur(v.out, cur).replace(/^\D+\s?/, "")}</span>
+                          <span className="font-semibold tabular-nums">{fmtCur(v.in - v.out, cur).replace(/^\D+\s?/, "")}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {reportTab === "monthly" && (
+                <>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <StatCard label="Month income" value={fmt(stats.mi)} tone="up" />
+                    <StatCard label="Month expenses" value={fmt(stats.me)} tone="down" />
+                    <StatCard label="B.com commission (18%)" value={"−" + fmt(stats.bcomMonth)} tone="down" />
+                    <StatCard label="Month net (after B.com)" value={fmt(stats.mi - stats.me - stats.bcomMonth)} />
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                    {monthByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this month yet</p> : monthByCat.map((c) => (
+                      <div key={c.type + c.cat} className="mb-3 last:mb-0">
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-600">{c.cat}</span>
+                          <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                        </div>
+                        <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / maxCat) * 100 + "%" }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {Object.keys(budgets).length > 0 && (
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <h2 className="text-sm font-semibold text-slate-800 mb-3">Budget usage</h2>
+                      {Object.entries(budgets).map(([cat, limit]) => {
+                        const spent = monthExpenseByCat[cat] || 0;
+                        const pct = Math.min(100, (spent / limit) * 100);
+                        const over = spent > limit;
+                        return (
+                          <div key={cat} className="mb-3 last:mb-0">
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="text-slate-600">{cat}</span>
+                              <span className={"font-semibold tabular-nums " + (over ? "text-rose-700" : "text-slate-700")}>{fmt(spent)} / {fmt(limit)}</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={"h-full rounded-full " + (over ? "bg-rose-500" : pct >= 80 ? "bg-amber-400" : "bg-teal-500")} style={{ width: pct + "%" }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {loaded && view === "settings" && role === "admin" && (
+            <div className="px-4 pt-4">
+              {savedMsg && <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">{savedMsg}</div>}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                <h2 className="text-sm font-semibold text-slate-800 mb-1">Admin PIN</h2>
+                <p className="text-xs text-slate-500 mb-2">Staff can only add entries and manage rooms. This PIN unlocks totals, reports, and settings.</p>
+                <div className="flex gap-2">
+                  <input type="password" inputMode="numeric" value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="New PIN (4–6 digits)" className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                  <button onClick={savePin} className="px-4 py-2 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save</button>
+                </div>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                <h2 className="text-sm font-semibold text-slate-800 mb-1">Rooms</h2>
+                <p className="text-xs text-slate-500 mb-2">List your room numbers separated by commas.</p>
+                <input value={roomListDraft} onChange={(e) => setRoomListDraft(e.target.value)} placeholder="101, 102, 201, 202" className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-2 text-sm" />
+                <button onClick={saveRoomList} className="w-full py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save room list</button>
+              </div>
+              {hasCustomView && (
+                <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                  <h2 className="text-sm font-semibold text-slate-800 mb-1">Categories</h2>
+                  <p className="text-xs text-slate-500 mb-2">Remove ones you no longer need — existing entries keep their category label.</p>
+                  <div className="max-h-60 overflow-y-auto">
+                    {[...incomeCats.map((c) => ["income", c]), ...expenseCats.map((c) => ["expense", c])].map(([type, c]) => (
+                      <div key={type + c} className="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0">
+                        <span className="text-xs text-slate-700">{c} <span className="text-slate-400">({type})</span></span>
+                        <button onClick={() => removeCategory(type, c)} className="text-slate-300 hover:text-rose-500 text-xs" aria-label="Remove category">✕</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <BudgetEditor budgets={budgets} onSave={saveBudgets} expenseCats={expenseCats} />
+            </div>
+          )}
+        </main>
+
+        <nav className="fixed bottom-0 w-full max-w-md bg-white border-t border-slate-200 flex">
+          <Nav id="dashboard" label="Home" icon="⌂" />
+          <Nav id="rooms" label="Rooms" icon="◫" />
+          <Nav id="add" label="Add" icon="+" />
+          <Nav id="transactions" label="Entries" icon="≡" />
+          {role === "admin" && (
+            <>
+              <Nav id="reports" label="Reports" icon="▤" />
+              <Nav id="settings" label="Settings" icon="⚙" />
+            </>
+          )}
+        </nav>
+      </div>
+    </div>
+  );
+}
