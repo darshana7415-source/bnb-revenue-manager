@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 
-const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
+const PAY_METHODS = ["Cash", "Com Bank", "DFCC", "NTB", "Global", "Bank transfer", "Online"];
 const ROOM_STATUSES = [
   { id: "vacant", label: "Vacant" },
   { id: "checkin", label: "Check-in" },
