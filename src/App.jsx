@@ -40,6 +40,8 @@ const rowToTxn = (r) => ({
   currency: r.currency || "LKR",
   category: r.category,
   room: r.room || undefined,
+  guestEvent: r.guest_event || undefined,
+  guestName: r.guest_name || undefined,
   method: r.method,
   date: r.txn_date,
   note: r.note || "",
@@ -67,6 +69,13 @@ function StatCard({ label, value, tone }) {
   );
 }
 
+const GUEST_EVENT_STYLE = {
+  checkin: "bg-sky-50 text-sky-700 border-sky-200",
+  staying: "bg-teal-50 text-teal-700 border-teal-200",
+  checkout: "bg-amber-50 text-amber-700 border-amber-200",
+};
+const GUEST_EVENT_LABEL = { checkin: "Check-in", staying: "Staying", checkout: "Check-out" };
+
 function TxnRow({ t, onDelete, onMarkPaid, onEdit, history }) {
   const income = t.type === "income";
   const pending = t.status === "pending";
@@ -80,13 +89,18 @@ function TxnRow({ t, onDelete, onMarkPaid, onEdit, history }) {
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-slate-800 truncate flex items-center gap-2">
             <span className="truncate">{t.category}{t.room ? " · Rm " + t.room : ""}</span>
+            {t.guestEvent && (
+              <span className={"text-[10px] font-semibold uppercase tracking-wide border rounded px-1.5 py-0.5 shrink-0 " + GUEST_EVENT_STYLE[t.guestEvent]}>
+                {GUEST_EVENT_LABEL[t.guestEvent]}
+              </span>
+            )}
             {t.currency && t.currency !== "LKR" && <span className="text-[10px] font-semibold uppercase tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200 rounded px-1.5 py-0.5 shrink-0">{t.currency}</span>}
             {pending && <span className="text-[10px] font-semibold uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 shrink-0">Pending</span>}
             {t.edited && (
               <button onClick={() => setShowHistory(!showHistory)} className="text-[10px] font-semibold uppercase tracking-wide bg-purple-50 text-purple-700 border border-purple-200 rounded px-1.5 py-0.5 shrink-0">Edited</button>
             )}
           </div>
-          <div className="text-xs text-slate-500 truncate">{t.note ? t.note + " · " : ""}{t.method} · {t.date}{t.enteredBy ? " · by " + t.enteredBy : ""}</div>
+          <div className="text-xs text-slate-500 truncate">{t.guestName ? t.guestName + " · " : ""}{t.note ? t.note + " · " : ""}{t.method} · {t.date}{t.enteredBy ? " · by " + t.enteredBy : ""}</div>
         </div>
         <div className={"text-sm font-semibold tabular-nums " + (income ? "text-emerald-700" : "text-rose-700")}>
           {income ? "+" : "−"}{fmtCur(t.amount, t.currency).replace(/^\D+\s?/, "")}
@@ -169,6 +183,13 @@ function AddForm({ onSave, onCancel, rooms, prefill, editTxn, incomeCats, expens
     const cur = rooms.find((x) => x.no === rno);
     return cur && cur.status !== "vacant" ? cur.status : "checkin";
   });
+  const [guestName, setGuestName] = useState(() => {
+    if (editTxn?.guestName) return editTxn.guestName;
+    const rno = prefill?.room;
+    if (!rno) return "";
+    const cur = rooms.find((x) => x.no === rno);
+    return cur?.guest || "";
+  });
   const [method, setMethod] = useState(() => (editTxn && CARD_PROVIDERS.includes(editTxn.method) ? "Card" : editTxn?.method || "Cash"));
   const [cardProvider, setCardProvider] = useState(() => (editTxn && CARD_PROVIDERS.includes(editTxn.method) ? editTxn.method : CARD_PROVIDERS[0]));
   const [date, setDate] = useState(editTxn?.date || todayStr());
@@ -178,18 +199,19 @@ function AddForm({ onSave, onCancel, rooms, prefill, editTxn, incomeCats, expens
   const cats = type === "income" ? incomeCats : expenseCats;
 
   const pickRoom = (r) => {
-    if (room === r) { setRoom(""); setRoomStatus(""); return; }
+    if (room === r) { setRoom(""); setRoomStatus(""); setGuestName(""); return; }
     setRoom(r);
     const cur = rooms.find((x) => x.no === r);
     setRoomStatus(cur && cur.status !== "vacant" ? cur.status : "checkin");
+    setGuestName(cur && cur.status !== "vacant" ? cur.guest || "" : "");
   };
-  const switchType = (t) => { setType(t); setCategory(t === "income" ? incomeCats[0] : expenseCats[0]); setRoom(""); setRoomStatus(""); };
+  const switchType = (t) => { setType(t); setCategory(t === "income" ? incomeCats[0] : expenseCats[0]); setRoom(""); setRoomStatus(""); setGuestName(""); };
   const valid = Number(amount) > 0 && category;
   const finalMethod = method === "Card" ? cardProvider : method;
 
   const submit = async () => {
     setSaving(true);
-    await onSave({ id: editTxn?.id, type, amount: Number(amount), currency, category, room: room || undefined, roomStatus: room ? roomStatus : undefined, method: finalMethod, date, note, status });
+    await onSave({ id: editTxn?.id, type, amount: Number(amount), currency, category, room: room || undefined, roomStatus: room ? roomStatus : undefined, guestName: room ? guestName : undefined, method: finalMethod, date, note, status });
     setSaving(false);
   };
 
@@ -236,6 +258,9 @@ function AddForm({ onSave, onCancel, rooms, prefill, editTxn, incomeCats, expens
                 <button onClick={() => setRoomStatus("staying")} className={"flex-1 py-2 rounded-lg text-xs font-medium border " + (roomStatus === "staying" ? "bg-teal-600 text-white border-teal-600" : "bg-white text-slate-600 border-slate-200")}>Staying</button>
                 <button onClick={() => setRoomStatus("checkout")} className={"flex-1 py-2 rounded-lg text-xs font-medium border " + (roomStatus === "checkout" ? "bg-amber-500 text-white border-amber-500" : "bg-white text-slate-600 border-slate-200")}>Check-out</button>
               </div>
+              <label className="block text-xs text-slate-500 mb-1">Guest name — tags this payment so same-day turnovers stay distinct</label>
+              <input value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Guest name"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2.5 mb-4 text-sm" />
             </>
           )}
         </>
@@ -434,8 +459,8 @@ export default function App() {
   };
 
   const addTxn = async (t) => {
-    const { roomStatus, id, ...fields } = t;
-    const dbFields = { type: fields.type, amount: fields.amount, currency: fields.currency || "LKR", category: fields.category, room: fields.room || null, method: fields.method, txn_date: fields.date, note: fields.note || null, status: fields.status };
+    const { roomStatus, guestName, id, ...fields } = t;
+    const dbFields = { type: fields.type, amount: fields.amount, currency: fields.currency || "LKR", category: fields.category, room: fields.room || null, guest_event: fields.room ? roomStatus : null, guest_name: fields.room ? guestName || null : null, method: fields.method, txn_date: fields.date, note: fields.note || null, status: fields.status };
 
     if (id) {
       const before = txns.find((x) => x.id === id);
@@ -453,7 +478,7 @@ export default function App() {
       const cur = rooms.find((r) => r.no === fields.room);
       await supabase.from("rooms").update({
         status: roomStatus,
-        guest: roomStatus === "vacant" ? "" : cur?.guest || "",
+        guest: roomStatus === "vacant" ? "" : (guestName || cur?.guest || ""),
         checkout_date: roomStatus === "vacant" ? null : cur?.out || null,
       }).eq("no", fields.room);
     }
