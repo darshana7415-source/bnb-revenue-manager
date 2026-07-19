@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 
@@ -20,6 +19,8 @@ const STATUS_STYLE = {
 };
 const BCOM_CAT = "Room – Booking.com";
 const BCOM_RATE = 0.18;
+const CARD_COMMISSION_RATE = 0.03;
+const ONLINE_COMMISSION_RATE = 0.02;
 
 const fmt = (n) => "Rs " + Math.round(n || 0).toLocaleString("en-LK");
 const fmtCur = (n, currency) => {
@@ -517,8 +518,8 @@ export default function App() {
   const month = today.slice(0, 7);
 
   const stats = useMemo(() => {
-    let ti = 0, te = 0, mi = 0, me = 0, recv = 0, pay = 0, bcomToday = 0, bcomMonth = 0, bcomAll = 0;
-    const fx = {}; // { USD: { today: {in,out}, month: {in,out} }, ... }
+    let ti = 0, te = 0, mi = 0, me = 0, recv = 0, pay = 0, bcomToday = 0, bcomMonth = 0, bcomAll = 0, cardComToday = 0, cardComMonth = 0, cardComAll = 0, onlineComToday = 0, onlineComMonth = 0, onlineComAll = 0;
+    const fx = {}; // { USD: { today: {in,out}, month: {in,out}, todayCom, monthCom, allCom, catInc: {cat: amt} }, ... }
     for (const t of txns) {
       const v = Number(t.amount) || 0;
       const cur = t.currency || "LKR";
@@ -526,18 +527,26 @@ export default function App() {
       if (!paid) { if (cur === "LKR") { t.type === "income" ? (recv += v) : (pay += v); } continue; }
 
       if (cur !== "LKR") {
-        if (!fx[cur]) fx[cur] = { today: { in: 0, out: 0 }, month: { in: 0, out: 0 } };
-        if (t.date === today) t.type === "income" ? (fx[cur].today.in += v) : (fx[cur].today.out += v);
-        if (t.date && t.date.startsWith(month)) t.type === "income" ? (fx[cur].month.in += v) : (fx[cur].month.out += v);
+        if (!fx[cur]) fx[cur] = { today: { in: 0, out: 0 }, month: { in: 0, out: 0 }, todayCom: 0, monthCom: 0, allCom: 0, catInc: {} };
+        const fxCom = t.type !== "income" ? 0 : CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
+        if (t.date === today) { t.type === "income" ? (fx[cur].today.in += v) : (fx[cur].today.out += v); fx[cur].todayCom += fxCom; }
+        if (t.date && t.date.startsWith(month)) {
+          t.type === "income" ? (fx[cur].month.in += v) : (fx[cur].month.out += v);
+          fx[cur].monthCom += fxCom;
+          if (t.type === "income") fx[cur].catInc[t.category] = (fx[cur].catInc[t.category] || 0) + v;
+        }
+        fx[cur].allCom += fxCom;
         continue;
       }
 
       const bcom = t.type === "income" && t.category === BCOM_CAT ? v * BCOM_RATE : 0;
-      bcomAll += bcom;
-      if (t.date === today) { t.type === "income" ? (ti += v) : (te += v); bcomToday += bcom; }
-      if (t.date && t.date.startsWith(month)) { t.type === "income" ? (mi += v) : (me += v); bcomMonth += bcom; }
+      const cardCom = t.type === "income" && CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : 0;
+      const onlineCom = t.type === "income" && t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
+      bcomAll += bcom; cardComAll += cardCom; onlineComAll += onlineCom;
+      if (t.date === today) { t.type === "income" ? (ti += v) : (te += v); bcomToday += bcom; cardComToday += cardCom; onlineComToday += onlineCom; }
+      if (t.date && t.date.startsWith(month)) { t.type === "income" ? (mi += v) : (me += v); bcomMonth += bcom; cardComMonth += cardCom; onlineComMonth += onlineCom; }
     }
-    return { ti, te, mi, me, recv, pay, bcomToday, bcomMonth, bcomAll, fx };
+    return { ti, te, mi, me, recv, pay, bcomToday, bcomMonth, bcomAll, cardComToday, cardComMonth, cardComAll, onlineComToday, onlineComMonth, onlineComAll, fx };
   }, [txns]);
 
   const roomStats = useMemo(() => {
@@ -572,24 +581,34 @@ export default function App() {
 
   const dayReport = useMemo(() => {
     const inc = {}, exp = {}, methods = {}, fx = {};
-    let ti = 0, te = 0, pendCount = 0, bcom = 0;
+    let ti = 0, te = 0, pendCount = 0, bcom = 0, cardCom = 0, onlineCom = 0;
     for (const t of txns) {
       if (t.date !== reportDate) continue;
       const v = Number(t.amount) || 0;
       const cur = t.currency || "LKR";
       if (t.status === "pending") { pendCount++; continue; }
       if (cur !== "LKR") {
-        if (!fx[cur]) fx[cur] = { in: 0, out: 0 };
+        if (!fx[cur]) fx[cur] = { in: 0, out: 0, com: 0, catInc: {} };
         t.type === "income" ? (fx[cur].in += v) : (fx[cur].out += v);
+        if (t.type === "income") {
+          if (CARD_PROVIDERS.includes(t.method)) fx[cur].com += v * CARD_COMMISSION_RATE;
+          if (t.method === "Online") fx[cur].com += v * ONLINE_COMMISSION_RATE;
+          fx[cur].catInc[t.category] = (fx[cur].catInc[t.category] || 0) + v;
+        }
         continue;
       }
-      if (t.type === "income") { inc[t.category] = (inc[t.category] || 0) + v; ti += v; if (t.category === BCOM_CAT) bcom += v * BCOM_RATE; }
+      if (t.type === "income") {
+        inc[t.category] = (inc[t.category] || 0) + v; ti += v;
+        if (t.category === BCOM_CAT) bcom += v * BCOM_RATE;
+        if (CARD_PROVIDERS.includes(t.method)) cardCom += v * CARD_COMMISSION_RATE;
+        if (t.method === "Online") onlineCom += v * ONLINE_COMMISSION_RATE;
+      }
       else { exp[t.category] = (exp[t.category] || 0) + v; te += v; }
       if (!methods[t.method]) methods[t.method] = { in: 0, out: 0 };
       t.type === "income" ? (methods[t.method].in += v) : (methods[t.method].out += v);
     }
     const sort = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]);
-    return { inc: sort(inc), exp: sort(exp), ti, te, bcom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
+    return { inc: sort(inc), exp: sort(exp), ti, te, bcom, cardCom, onlineCom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
   }, [txns, reportDate]);
 
   const monthByCat = useMemo(() => {
@@ -700,8 +719,8 @@ export default function App() {
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <StatCard label="Today's income" value={fmt(stats.ti)} tone="up" />
                 <StatCard label="Today's expenses" value={fmt(stats.te)} tone="down" />
-                <StatCard label="Net today (after B.com 18%)" value={fmt(stats.ti - stats.te - stats.bcomToday)} />
-                <StatCard label="Month net (after B.com 18%)" value={fmt(stats.mi - stats.me - stats.bcomMonth)} />
+                <StatCard label="Net today (after commissions)" value={fmt(stats.ti - stats.te - stats.bcomToday - stats.cardComToday - stats.onlineComToday)} />
+                <StatCard label="Month net (after commissions)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
               </div>
 
               {stats.bcomAll > 0 && (
@@ -715,15 +734,53 @@ export default function App() {
                 </div>
               )}
 
+              {stats.cardComAll > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3">
+                  <div className="text-xs text-slate-500 mb-1.5">Card commission accrued (3% — Com Bank / DFCC / NTB / Global)</div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Today</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.cardComToday)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">This month</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.cardComMonth)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Total accrued</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.cardComAll)}</div></div>
+                  </div>
+                </div>
+              )}
+
+              {stats.onlineComAll > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3">
+                  <div className="text-xs text-slate-500 mb-1.5">Online payment commission accrued (2%)</div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Today</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.onlineComToday)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">This month</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.onlineComMonth)}</div></div>
+                    <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Total accrued</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.onlineComAll)}</div></div>
+                  </div>
+                </div>
+              )}
+
               {Object.keys(stats.fx).length > 0 && (
                 <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
-                  <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency (this month, not converted)</h2>
+                  <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency income (this month, not converted)</h2>
                   {Object.entries(stats.fx).map(([cur, v]) => (
-                    <div key={cur} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
-                      <span className="font-semibold text-indigo-700">{cur}</span>
-                      <span className="text-emerald-700 tabular-nums">+{fmtCur(v.month.in, cur).replace(/^\D+\s?/, "")}</span>
-                      <span className="text-rose-700 tabular-nums">−{fmtCur(v.month.out, cur).replace(/^\D+\s?/, "")}</span>
-                      <span className="font-semibold tabular-nums">{fmtCur(v.month.in - v.month.out, cur).replace(/^\D+\s?/, "")}</span>
+                    <div key={cur} className="mb-3 last:mb-0 pb-3 last:pb-0 border-b border-slate-50 last:border-0">
+                      <div className="flex items-center justify-between text-xs mb-1.5">
+                        <span className="font-semibold text-indigo-700">{cur}</span>
+                        <span className="text-emerald-700 tabular-nums">+{fmtCur(v.month.in, cur).replace(/^\D+\s?/, "")}</span>
+                        <span className="text-rose-700 tabular-nums">−{fmtCur(v.month.out, cur).replace(/^\D+\s?/, "")}</span>
+                      </div>
+                      {Object.entries(v.catInc).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
+                        <div key={cat} className="flex justify-between text-[11px] text-slate-500 py-0.5 pl-2">
+                          <span>{cat}</span><span className="tabular-nums">{fmtCur(amt, cur).replace(/^\D+\s?/, "")}</span>
+                        </div>
+                      ))}
+                      {v.monthCom > 0 && (
+                        <div className="flex items-center justify-between text-[11px] text-orange-700 mt-1">
+                          <span>Card/Online commission</span>
+                          <span className="tabular-nums">−{fmtCur(v.monthCom, cur).replace(/^\D+\s?/, "")}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between text-xs font-semibold pt-0.5">
+                        <span>Net (after commission)</span>
+                        <span className="tabular-nums">{fmtCur(v.month.in - v.month.out - v.monthCom, cur).replace(/^\D+\s?/, "")}</span>
+                      </div>
                     </div>
                   ))}
                   <p className="text-[10px] text-slate-400 mt-1.5">Kept separate from LKR totals above — no exchange rate applied.</p>
@@ -848,7 +905,7 @@ export default function App() {
                   <div className="grid grid-cols-3 gap-2 mb-3">
                     <StatCard label="Income" value={fmt(dayReport.ti)} tone="up" />
                     <StatCard label="Expenses" value={fmt(dayReport.te)} tone="down" />
-                    <StatCard label="Net (after B.com)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom)} />
+                    <StatCard label="Net (after commissions)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
                   </div>
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
@@ -863,14 +920,24 @@ export default function App() {
                           <span className="text-slate-800">Total income</span><span className="tabular-nums text-emerald-700">{fmt(dayReport.ti)}</span>
                         </div>
                         {dayReport.bcom > 0 && (
-                          <>
-                            <div className="flex justify-between text-xs pt-1.5">
-                              <span className="text-orange-700">Less: Booking.com commission (18%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.bcom)}</span>
-                            </div>
-                            <div className="flex justify-between text-xs pt-1.5 font-semibold">
-                              <span className="text-slate-800">Income after commission</span><span className="tabular-nums text-emerald-800">{fmt(dayReport.ti - dayReport.bcom)}</span>
-                            </div>
-                          </>
+                          <div className="flex justify-between text-xs pt-1.5">
+                            <span className="text-orange-700">Less: Booking.com commission (18%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.bcom)}</span>
+                          </div>
+                        )}
+                        {dayReport.cardCom > 0 && (
+                          <div className="flex justify-between text-xs pt-1.5">
+                            <span className="text-orange-700">Less: Card commission (3%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.cardCom)}</span>
+                          </div>
+                        )}
+                        {dayReport.onlineCom > 0 && (
+                          <div className="flex justify-between text-xs pt-1.5">
+                            <span className="text-orange-700">Less: Online payment commission (2%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.onlineCom)}</span>
+                          </div>
+                        )}
+                        {(dayReport.bcom > 0 || dayReport.cardCom > 0 || dayReport.onlineCom > 0) && (
+                          <div className="flex justify-between text-xs pt-1.5 font-semibold">
+                            <span className="text-slate-800">Income after commissions</span><span className="tabular-nums text-emerald-800">{fmt(dayReport.ti - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)}</span>
+                          </div>
                         )}
                       </>
                     )}
@@ -909,13 +976,29 @@ export default function App() {
                   )}
                   {dayReport.fx.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
-                      <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency this day (not converted)</h2>
+                      <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency income this day (not converted)</h2>
                       {dayReport.fx.map(([cur, v]) => (
-                        <div key={cur} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
-                          <span className="font-semibold text-indigo-700">{cur}</span>
-                          <span className="text-emerald-700 tabular-nums">+{fmtCur(v.in, cur).replace(/^\D+\s?/, "")}</span>
-                          <span className="text-rose-700 tabular-nums">−{fmtCur(v.out, cur).replace(/^\D+\s?/, "")}</span>
-                          <span className="font-semibold tabular-nums">{fmtCur(v.in - v.out, cur).replace(/^\D+\s?/, "")}</span>
+                        <div key={cur} className="mb-3 last:mb-0 pb-3 last:pb-0 border-b border-slate-50 last:border-0">
+                          <div className="flex items-center justify-between text-xs mb-1.5">
+                            <span className="font-semibold text-indigo-700">{cur}</span>
+                            <span className="text-emerald-700 tabular-nums">+{fmtCur(v.in, cur).replace(/^\D+\s?/, "")}</span>
+                            <span className="text-rose-700 tabular-nums">−{fmtCur(v.out, cur).replace(/^\D+\s?/, "")}</span>
+                          </div>
+                          {Object.entries(v.catInc).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
+                            <div key={cat} className="flex justify-between text-[11px] text-slate-500 py-0.5 pl-2">
+                              <span>{cat}</span><span className="tabular-nums">{fmtCur(amt, cur).replace(/^\D+\s?/, "")}</span>
+                            </div>
+                          ))}
+                          {v.com > 0 && (
+                            <div className="flex items-center justify-between text-[11px] text-orange-700 mt-1">
+                              <span>Card/Online commission</span>
+                              <span className="tabular-nums">−{fmtCur(v.com, cur).replace(/^\D+\s?/, "")}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between text-xs font-semibold pt-0.5">
+                            <span>Net (after commission)</span>
+                            <span className="tabular-nums">{fmtCur(v.in - v.out - v.com, cur).replace(/^\D+\s?/, "")}</span>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -929,7 +1012,11 @@ export default function App() {
                     <StatCard label="Month income" value={fmt(stats.mi)} tone="up" />
                     <StatCard label="Month expenses" value={fmt(stats.me)} tone="down" />
                     <StatCard label="B.com commission (18%)" value={"−" + fmt(stats.bcomMonth)} tone="down" />
-                    <StatCard label="Month net (after B.com)" value={fmt(stats.mi - stats.me - stats.bcomMonth)} />
+                    <StatCard label="Card commission (3%)" value={"−" + fmt(stats.cardComMonth)} tone="down" />
+                    <StatCard label="Online commission (2%)" value={"−" + fmt(stats.onlineComMonth)} tone="down" />
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 mb-3">
+                    <StatCard label="Month net (after commissions)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
                   </div>
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     {monthByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this month yet</p> : monthByCat.map((c) => (
