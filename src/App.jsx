@@ -3,8 +3,9 @@ import { supabase } from "./lib/supabaseClient";
 
 const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
 const CARD_PROVIDERS = ["Com Bank", "DFCC", "NTB", "Global"];
-const CURRENCIES = ["LKR", "USD", "EUR", "AUD"];
-const CUR_SYMBOL = { LKR: "Rs", USD: "$", EUR: "€", AUD: "A$" };
+const CURRENCIES = ["LKR", "USD", "EUR", "GBP", "AUD"];
+const CUR_SYMBOL = { LKR: "Rs", USD: "$", EUR: "€", GBP: "£", AUD: "A$" };
+const RATE_CURRENCIES = ["USD", "EUR", "GBP"]; // exchange rates supported for now
 const ROOM_STATUSES = [
   { id: "vacant", label: "Vacant" },
   { id: "checkin", label: "Check-in" },
@@ -384,6 +385,8 @@ export default function App() {
   const [incomeCats, setIncomeCats] = useState([]);
   const [expenseCats, setExpenseCats] = useState([]);
   const [adminPin, setAdminPin] = useState("0105");
+  const [rates, setRates] = useState({}); // { USD: 300, EUR: 320, GBP: 380 }
+  const [rateDraft, setRateDraft] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [filter, setFilter] = useState("all");
@@ -426,6 +429,13 @@ export default function App() {
     setBudgets(Object.fromEntries(budgetsRes.data.map((b) => [b.category, Number(b.monthly_limit)])));
     const pin = settingsRes.data.find((s) => s.key === "admin_pin");
     if (pin) setAdminPin(pin.value);
+    const loadedRates = {};
+    for (const cur of RATE_CURRENCIES) {
+      const row = settingsRes.data.find((s) => s.key === "fx_" + cur.toLowerCase());
+      if (row) loadedRates[cur] = Number(row.value);
+    }
+    setRates(loadedRates);
+    setRateDraft(loadedRates);
     setLoaded(true);
   }, []);
 
@@ -443,6 +453,17 @@ export default function App() {
     const { error } = await supabase.from("settings").upsert({ key: "admin_pin", value: p });
     if (error) { flash("Error: " + error.message); return; }
     setAdminPin(p); setNewPin(""); flash("Admin PIN updated");
+  };
+  const saveRates = async () => {
+    const rows = RATE_CURRENCIES.filter((c) => rateDraft[c] > 0).map((c) => ({ key: "fx_" + c.toLowerCase(), value: String(rateDraft[c]) }));
+    if (rows.length) {
+      const { error } = await supabase.from("settings").upsert(rows);
+      if (error) { flash("Error: " + error.message); return; }
+    }
+    const next = {};
+    for (const c of RATE_CURRENCIES) if (rateDraft[c] > 0) next[c] = Number(rateDraft[c]);
+    setRates(next);
+    flash("Exchange rates updated");
   };
 
   const FIELD_LABELS = { amount: "amount", currency: "currency", category: "category", room: "room", method: "method", date: "date", note: "note", status: "payment status" };
@@ -542,9 +563,14 @@ export default function App() {
   const today = todayStr();
   const month = today.slice(0, 7);
 
+  const year = today.slice(0, 4);
+
   const stats = useMemo(() => {
-    let ti = 0, te = 0, mi = 0, me = 0, recv = 0, pay = 0, bcomToday = 0, bcomMonth = 0, bcomAll = 0, cardComToday = 0, cardComMonth = 0, cardComAll = 0, onlineComToday = 0, onlineComMonth = 0, onlineComAll = 0;
-    const fx = {}; // { USD: { today: {in,out}, month: {in,out}, todayCom, monthCom, allCom, catInc: {cat: amt} }, ... }
+    let ti = 0, te = 0, mi = 0, me = 0, yi = 0, ye = 0, recv = 0, pay = 0;
+    let bcomToday = 0, bcomMonth = 0, bcomYear = 0, bcomAll = 0;
+    let cardComToday = 0, cardComMonth = 0, cardComYear = 0, cardComAll = 0;
+    let onlineComToday = 0, onlineComMonth = 0, onlineComYear = 0, onlineComAll = 0;
+    const fx = {}; // { USD: { today:{in,out}, month:{in,out}, year:{in,out}, todayCom, monthCom, yearCom, allCom, catInc:{cat:amt} }, ... }
     for (const t of txns) {
       const v = Number(t.amount) || 0;
       const cur = t.currency || "LKR";
@@ -552,7 +578,7 @@ export default function App() {
       if (!paid) { if (cur === "LKR") { t.type === "income" ? (recv += v) : (pay += v); } continue; }
 
       if (cur !== "LKR") {
-        if (!fx[cur]) fx[cur] = { today: { in: 0, out: 0 }, month: { in: 0, out: 0 }, todayCom: 0, monthCom: 0, allCom: 0, catInc: {} };
+        if (!fx[cur]) fx[cur] = { today: { in: 0, out: 0 }, month: { in: 0, out: 0 }, year: { in: 0, out: 0 }, todayCom: 0, monthCom: 0, yearCom: 0, allCom: 0, catInc: {} };
         const fxCom = t.type !== "income" ? 0 : CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
         if (t.date === today) { t.type === "income" ? (fx[cur].today.in += v) : (fx[cur].today.out += v); fx[cur].todayCom += fxCom; }
         if (t.date && t.date.startsWith(month)) {
@@ -560,6 +586,7 @@ export default function App() {
           fx[cur].monthCom += fxCom;
           if (t.type === "income") fx[cur].catInc[t.category] = (fx[cur].catInc[t.category] || 0) + v;
         }
+        if (t.date && t.date.startsWith(year)) { t.type === "income" ? (fx[cur].year.in += v) : (fx[cur].year.out += v); fx[cur].yearCom += fxCom; }
         fx[cur].allCom += fxCom;
         continue;
       }
@@ -570,9 +597,23 @@ export default function App() {
       bcomAll += bcom; cardComAll += cardCom; onlineComAll += onlineCom;
       if (t.date === today) { t.type === "income" ? (ti += v) : (te += v); bcomToday += bcom; cardComToday += cardCom; onlineComToday += onlineCom; }
       if (t.date && t.date.startsWith(month)) { t.type === "income" ? (mi += v) : (me += v); bcomMonth += bcom; cardComMonth += cardCom; onlineComMonth += onlineCom; }
+      if (t.date && t.date.startsWith(year)) { t.type === "income" ? (yi += v) : (ye += v); bcomYear += bcom; cardComYear += cardCom; onlineComYear += onlineCom; }
     }
-    return { ti, te, mi, me, recv, pay, bcomToday, bcomMonth, bcomAll, cardComToday, cardComMonth, cardComAll, onlineComToday, onlineComMonth, onlineComAll, fx };
+    return { ti, te, mi, me, yi, ye, recv, pay, bcomToday, bcomMonth, bcomYear, bcomAll, cardComToday, cardComMonth, cardComYear, cardComAll, onlineComToday, onlineComMonth, onlineComYear, onlineComAll, fx };
   }, [txns]);
+
+  // rate-converted foreign totals: { today: X, month: X, year: X } in LKR equivalent, only for currencies with a set rate
+  const fxConverted = useMemo(() => {
+    const out = { today: 0, month: 0, year: 0, missingCur: [] };
+    for (const [cur, v] of Object.entries(stats.fx)) {
+      const rate = rates[cur];
+      if (!rate) { if ((v.today.in || v.month.in || v.year.in)) out.missingCur.push(cur); continue; }
+      out.today += (v.today.in - v.today.out - v.todayCom) * rate;
+      out.month += (v.month.in - v.month.out - v.monthCom) * rate;
+      out.year += (v.year.in - v.year.out - v.yearCom) * rate;
+    }
+    return out;
+  }, [stats.fx, rates]);
 
   const roomStats = useMemo(() => {
     const occupied = rooms.filter((r) => r.status === "staying" || r.status === "checkin").length;
@@ -635,6 +676,16 @@ export default function App() {
     const sort = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]);
     return { inc: sort(inc), exp: sort(exp), ti, te, bcom, cardCom, onlineCom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
   }, [txns, reportDate]);
+
+  const dayFxConverted = useMemo(() => {
+    let total = 0; const missingCur = [];
+    for (const [cur, v] of dayReport.fx) {
+      const rate = rates[cur];
+      if (!rate) { if (v.in) missingCur.push(cur); continue; }
+      total += (v.in - v.out - v.com) * rate;
+    }
+    return { total, missingCur };
+  }, [dayReport.fx, rates]);
 
   const monthByCat = useMemo(() => {
     const map = {};
@@ -747,6 +798,18 @@ export default function App() {
                 <StatCard label="Net today (after commissions)" value={fmt(stats.ti - stats.te - stats.bcomToday - stats.cardComToday - stats.onlineComToday)} />
                 <StatCard label="Month net (after commissions)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
               </div>
+
+              {Object.keys(stats.fx).length > 0 && (
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <StatCard label="Month net — LKR only" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
+                  <StatCard label="Month net — LKR + foreign (converted)" value={fxConverted.month || fxConverted.missingCur.length ? fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth + fxConverted.month) : "—"} tone="up" />
+                </div>
+              )}
+              {fxConverted.missingCur.length > 0 && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+                  No exchange rate set for {fxConverted.missingCur.join(", ")} — that income isn't included in the combined figure above. Set rates in Settings.
+                </p>
+              )}
 
               {stats.bcomAll > 0 && (
                 <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3">
@@ -919,6 +982,7 @@ export default function App() {
               <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
                 <button onClick={() => setReportTab("daily")} className={"flex-1 py-2 text-sm font-medium " + (reportTab === "daily" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>Daily</button>
                 <button onClick={() => setReportTab("monthly")} className={"flex-1 py-2 text-sm font-medium " + (reportTab === "monthly" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>Monthly</button>
+                <button onClick={() => setReportTab("yearly")} className={"flex-1 py-2 text-sm font-medium " + (reportTab === "yearly" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>Yearly</button>
               </div>
 
               {reportTab === "daily" && (
@@ -932,6 +996,15 @@ export default function App() {
                     <StatCard label="Expenses" value={fmt(dayReport.te)} tone="down" />
                     <StatCard label="Net (after commissions)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
                   </div>
+                  {dayReport.fx.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <StatCard label="Net — LKR only" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
+                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom + dayFxConverted.total)} tone="up" />
+                    </div>
+                  )}
+                  {dayFxConverted.missingCur.length > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {dayFxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
+                  )}
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
                     {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map(([cat, v]) => (
@@ -1043,6 +1116,15 @@ export default function App() {
                   <div className="grid grid-cols-1 gap-3 mb-3">
                     <StatCard label="Month net (after commissions)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
                   </div>
+                  {Object.keys(stats.fx).length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <StatCard label="Net — LKR only" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
+                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth + fxConverted.month)} tone="up" />
+                    </div>
+                  )}
+                  {fxConverted.missingCur.length > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
+                  )}
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     {monthByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this month yet</p> : monthByCat.map((c) => (
                       <div key={c.type + c.cat} className="mb-3 last:mb-0">
@@ -1076,6 +1158,44 @@ export default function App() {
                         );
                       })}
                     </div>
+                  )}
+                </>
+              )}
+
+              {reportTab === "yearly" && (
+                <>
+                  <p className="text-xs text-slate-500 mb-3">Showing totals for {year}.</p>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <StatCard label="Year income (LKR)" value={fmt(stats.yi)} tone="up" />
+                    <StatCard label="Year expenses (LKR)" value={fmt(stats.ye)} tone="down" />
+                    <StatCard label="B.com commission (18%)" value={"−" + fmt(stats.bcomYear)} tone="down" />
+                    <StatCard label="Card + Online commission" value={"−" + fmt(stats.cardComYear + stats.onlineComYear)} tone="down" />
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 mb-3">
+                    <StatCard label="Year net — LKR only (after commissions)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear)} />
+                  </div>
+                  {Object.keys(stats.fx).length > 0 && (
+                    <>
+                      <div className="grid grid-cols-1 gap-3 mb-3">
+                        <StatCard label="Year net — LKR + foreign (converted)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear + fxConverted.year)} tone="up" />
+                      </div>
+                      {fxConverted.missingCur.length > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
+                      )}
+                      <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                        <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency income — {year} (not converted)</h2>
+                        {Object.entries(stats.fx).map(([cur, v]) => (
+                          <div key={cur} className="mb-2 last:mb-0 pb-2 last:pb-0 border-b border-slate-50 last:border-0">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-semibold text-indigo-700">{cur}</span>
+                              <span className="text-emerald-700 tabular-nums">+{fmtCur(v.year.in, cur).replace(/^\D+\s?/, "")}</span>
+                              <span className="text-rose-700 tabular-nums">−{fmtCur(v.year.out, cur).replace(/^\D+\s?/, "")}</span>
+                              {rates[cur] && <span className="text-slate-400 tabular-nums">≈ {fmt((v.year.in - v.year.out - v.yearCom) * rates[cur])}</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </>
               )}
@@ -1113,6 +1233,19 @@ export default function App() {
                   </div>
                 </div>
               )}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                <h2 className="text-sm font-semibold text-slate-800 mb-1">Exchange rates</h2>
+                <p className="text-xs text-slate-500 mb-2">How many LKR equal 1 unit of each currency today. Update daily as needed — used to show a combined LKR + foreign net on the dashboard and reports.</p>
+                {RATE_CURRENCIES.map((cur) => (
+                  <div key={cur} className="flex items-center gap-2 mb-2">
+                    <span className="text-xs text-slate-600 w-28">1 {cur} =</span>
+                    <input type="number" inputMode="decimal" value={rateDraft[cur] ?? ""} onChange={(e) => setRateDraft({ ...rateDraft, [cur]: e.target.value === "" ? "" : Number(e.target.value) })}
+                      placeholder="e.g. 300" className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-sm tabular-nums" />
+                    <span className="text-xs text-slate-400">LKR</span>
+                  </div>
+                ))}
+                <button onClick={saveRates} className="mt-1 w-full py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save exchange rates</button>
+              </div>
               <BudgetEditor budgets={budgets} onSave={saveBudgets} expenseCats={expenseCats} />
             </div>
           )}
