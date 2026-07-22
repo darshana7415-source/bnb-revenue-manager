@@ -698,6 +698,28 @@ export default function App() {
     return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
   }, [txns]);
 
+  const monthMethodBreakdown = useMemo(() => {
+    const map = {};
+    for (const t of txns) {
+      if (!t.date || !t.date.startsWith(month) || t.status === "pending") continue;
+      if ((t.currency || "LKR") !== "LKR") continue;
+      if (!map[t.method]) map[t.method] = { in: 0, out: 0 };
+      t.type === "income" ? (map[t.method].in += Number(t.amount)) : (map[t.method].out += Number(t.amount));
+    }
+    return Object.entries(map).sort((a, b) => b[1].in - a[1].in);
+  }, [txns]);
+
+  const yearMethodBreakdown = useMemo(() => {
+    const map = {};
+    for (const t of txns) {
+      if (!t.date || !t.date.startsWith(year) || t.status === "pending") continue;
+      if ((t.currency || "LKR") !== "LKR") continue;
+      if (!map[t.method]) map[t.method] = { in: 0, out: 0 };
+      t.type === "income" ? (map[t.method].in += Number(t.amount)) : (map[t.method].out += Number(t.amount));
+    }
+    return Object.entries(map).sort((a, b) => b[1].in - a[1].in);
+  }, [txns]);
+
   const filtered = useMemo(() => {
     if (filter === "all") return txns;
     if (filter === "pending") return txns.filter((t) => t.status === "pending");
@@ -1138,6 +1160,26 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                  {monthMethodBreakdown.length > 0 && (
+                    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                      <h2 className="text-sm font-semibold text-slate-800 mb-2">Income by payment method — {month}</h2>
+                      <div className="grid grid-cols-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                        <span>Method</span><span className="text-right">Income</span><span className="text-right">Expense</span>
+                      </div>
+                      {monthMethodBreakdown.map(([m, v]) => (
+                        <div key={m} className="grid grid-cols-3 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                          <span className="text-slate-700 font-medium">{m}</span>
+                          <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
+                          <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
+                        </div>
+                      ))}
+                      <div className="grid grid-cols-3 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                        <span className="text-slate-800">Total</span>
+                        <span className="text-right tabular-nums text-emerald-700">{fmt(monthMethodBreakdown.reduce((s, [, v]) => s + v.in, 0))}</span>
+                        <span className="text-right tabular-nums text-rose-700">{fmt(monthMethodBreakdown.reduce((s, [, v]) => s + v.out, 0))}</span>
+                      </div>
+                    </div>
+                  )}
                   {Object.keys(budgets).length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       <h2 className="text-sm font-semibold text-slate-800 mb-3">Budget usage</h2>
@@ -1196,6 +1238,26 @@ export default function App() {
                         ))}
                       </div>
                     </>
+                  )}
+                  {yearMethodBreakdown.length > 0 && (
+                    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                      <h2 className="text-sm font-semibold text-slate-800 mb-2">Income by payment method — {year}</h2>
+                      <div className="grid grid-cols-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                        <span>Method</span><span className="text-right">Income</span><span className="text-right">Expense</span>
+                      </div>
+                      {yearMethodBreakdown.map(([m, v]) => (
+                        <div key={m} className="grid grid-cols-3 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                          <span className="text-slate-700 font-medium">{m}</span>
+                          <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
+                          <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
+                        </div>
+                      ))}
+                      <div className="grid grid-cols-3 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                        <span className="text-slate-800">Total</span>
+                        <span className="text-right tabular-nums text-emerald-700">{fmt(yearMethodBreakdown.reduce((s, [, v]) => s + v.in, 0))}</span>
+                        <span className="text-right tabular-nums text-rose-700">{fmt(yearMethodBreakdown.reduce((s, [, v]) => s + v.out, 0))}</span>
+                      </div>
+                    </div>
                   )}
                 </>
               )}
