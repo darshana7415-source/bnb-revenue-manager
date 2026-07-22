@@ -367,6 +367,23 @@ function DrillDown({ label, txns }) {
 
 const REQUIRED_COLS = ["type", "amount", "currency", "category", "room", "guest_event", "guest_name", "method", "txn_date", "note", "status", "entered_by"];
 
+function normalizeDate(raw) {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // already correct
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); // DD/MM/YYYY (Excel default after re-save)
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/); // DD-MM-YYYY
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  return null;
+}
+
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
@@ -392,10 +409,12 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     rows.forEach((r, i) => {
       if (!["income", "expense"].includes(r.type)) errors.push(`Row ${i + 1}: type must be 'income' or 'expense', got '${r.type}'`);
       if (isNaN(Number(r.amount)) || Number(r.amount) <= 0) errors.push(`Row ${i + 1}: invalid amount '${r.amount}'`);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(r.txn_date)) errors.push(`Row ${i + 1}: txn_date must be YYYY-MM-DD, got '${r.txn_date}'`);
+      const normalized = normalizeDate(r.txn_date);
+      if (!normalized) errors.push(`Row ${i + 1}: couldn't understand date '${r.txn_date}' (expected YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY)`);
+      else r.txn_date = normalized;
       if (!allCats.has(r.category)) unknownCats.add(r.category);
-      if (!minDate || r.txn_date < minDate) minDate = r.txn_date;
-      if (!maxDate || r.txn_date > maxDate) maxDate = r.txn_date;
+      if (r.txn_date && (!minDate || r.txn_date < minDate)) minDate = r.txn_date;
+      if (r.txn_date && (!maxDate || r.txn_date > maxDate)) maxDate = r.txn_date;
       const key = r.type + "|" + r.category;
       catTotals[key] = (catTotals[key] || 0) + (Number(r.amount) || 0);
     });
