@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import Papa from "papaparse";
 import { supabase } from "./lib/supabaseClient";
 
 const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
@@ -360,6 +361,155 @@ function DrillDown({ label, txns }) {
           <div className="tabular-nums font-medium text-slate-800 shrink-0">{fmt(t.amount)}</div>
         </div>
       ))}
+    </div>
+  );
+}
+
+const REQUIRED_COLS = ["type", "amount", "currency", "category", "room", "guest_event", "guest_name", "method", "txn_date", "note", "status", "entered_by"];
+
+function ImportCSV({ incomeCats, expenseCats, onDone }) {
+  const [raw, setRaw] = useState("");
+  const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
+  const [confirmText, setConfirmText] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState(null);
+  const fileRef = useRef(null);
+
+  const analyze = (text) => {
+    setResult(null);
+    const res = Papa.parse(text.trim(), { header: true, skipEmptyLines: true });
+    const missing = REQUIRED_COLS.filter((c) => !res.meta.fields || !res.meta.fields.includes(c));
+    if (missing.length) {
+      setParsed({ rows: [], errors: [`Missing required column(s): ${missing.join(", ")}`], minDate: null, maxDate: null, byCat: [], unknownCats: [] });
+      return;
+    }
+    const rows = res.data.filter((r) => r.type && r.amount && r.txn_date);
+    const errors = [];
+    const allCats = new Set([...incomeCats, ...expenseCats]);
+    const unknownCats = new Set();
+    let minDate = null, maxDate = null;
+    const catTotals = {};
+    rows.forEach((r, i) => {
+      if (!["income", "expense"].includes(r.type)) errors.push(`Row ${i + 1}: type must be 'income' or 'expense', got '${r.type}'`);
+      if (isNaN(Number(r.amount)) || Number(r.amount) <= 0) errors.push(`Row ${i + 1}: invalid amount '${r.amount}'`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(r.txn_date)) errors.push(`Row ${i + 1}: txn_date must be YYYY-MM-DD, got '${r.txn_date}'`);
+      if (!allCats.has(r.category)) unknownCats.add(r.category);
+      if (!minDate || r.txn_date < minDate) minDate = r.txn_date;
+      if (!maxDate || r.txn_date > maxDate) maxDate = r.txn_date;
+      const key = r.type + "|" + r.category;
+      catTotals[key] = (catTotals[key] || 0) + (Number(r.amount) || 0);
+    });
+    const byCat = Object.entries(catTotals).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
+    setParsed({ rows, errors: errors.slice(0, 20), errorCount: errors.length, minDate, maxDate, byCat, unknownCats: [...unknownCats] });
+    setConfirmText("");
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => { setRaw(ev.target.result); analyze(ev.target.result); };
+    reader.readAsText(file);
+  };
+
+  const doImport = async () => {
+    if (!parsed || parsed.rows.length === 0) return;
+    setImporting(true);
+    const batchSize = 200;
+    let inserted = 0;
+    const errors = [];
+    for (let i = 0; i < parsed.rows.length; i += batchSize) {
+      const batch = parsed.rows.slice(i, i + batchSize).map((r) => ({
+        type: r.type,
+        amount: Number(r.amount),
+        currency: r.currency || "LKR",
+        category: r.category,
+        room: r.room || null,
+        guest_event: r.guest_event || null,
+        guest_name: r.guest_name || null,
+        method: r.method || "Cash",
+        txn_date: r.txn_date,
+        note: r.note || null,
+        status: r.status || "paid",
+        entered_by: r.entered_by || "admin",
+      }));
+      const { error } = await supabase.from("transactions").insert(batch);
+      if (error) errors.push(error.message);
+      else inserted += batch.length;
+    }
+    setImporting(false);
+    setResult({ inserted, errors });
+    if (errors.length === 0) {
+      setRaw(""); setParsed(null);
+      onDone();
+    }
+  };
+
+  const expectedConfirm = parsed && parsed.minDate === parsed.maxDate ? parsed.minDate : `${parsed?.minDate} to ${parsed?.maxDate}`;
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+      <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions from CSV</h2>
+      <p className="text-xs text-slate-500 mb-3">
+        Upload a CSV with columns: type, amount, currency, category, room, guest_event, guest_name, method, txn_date, note, status, entered_by.
+        You'll see exactly what date range and totals are about to be added before anything is saved.
+      </p>
+      <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} className="block w-full text-xs mb-3" />
+      <p className="text-[11px] text-slate-400 mb-3">Or paste CSV text directly:</p>
+      <textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={4} placeholder="type,amount,currency,category,room,guest_event,guest_name,method,txn_date,note,status,entered_by&#10;expense,1500,LKR,Kitchen – General,,,,Cash,2026-07-20,Egg house,paid,admin"
+        className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-xs font-mono" />
+      <button onClick={() => analyze(raw)} disabled={!raw.trim()} className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (raw.trim() ? "bg-teal-700" : "bg-slate-300")}>
+        Preview import
+      </button>
+
+      {parsed && parsed.errors.length > 0 && (
+        <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 mb-3">
+          <p className="text-xs font-semibold text-rose-700 mb-1">
+            {parsed.rows.length === 0 ? "Can't import — fix this first:" : `${parsed.errorCount} row(s) have problems (showing first ${parsed.errors.length}):`}
+          </p>
+          {parsed.errors.map((e, i) => <p key={i} className="text-[11px] text-rose-600">{e}</p>)}
+        </div>
+      )}
+
+      {parsed && parsed.rows.length > 0 && (
+        <div className="border border-teal-300 rounded-lg p-3 mb-3 bg-teal-50/40">
+          <p className="text-sm font-semibold text-slate-800 mb-1">{parsed.rows.length} transactions ready to import</p>
+          <p className="text-xs text-slate-600 mb-2">
+            Date range: <span className="font-semibold">{parsed.minDate}</span> to <span className="font-semibold">{parsed.maxDate}</span>
+          </p>
+          {parsed.unknownCats.length > 0 && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-2">
+              These categories don't exist yet and will be saved as-is (add them in Settings → Categories if you want them selectable for new entries): {parsed.unknownCats.join(", ")}
+            </p>
+          )}
+          <div className="bg-white rounded-lg p-2 mb-3 max-h-40 overflow-y-auto">
+            {parsed.byCat.map((c) => (
+              <div key={c.type + c.cat} className="flex justify-between text-xs py-0.5">
+                <span className={c.type === "income" ? "text-emerald-700" : "text-rose-700"}>{c.cat}</span>
+                <span className="tabular-nums font-medium">{fmt(c.total)}</span>
+              </div>
+            ))}
+          </div>
+          <label className="block text-xs text-slate-600 mb-1">
+            To confirm, type the date range shown above (<span className="font-mono">{expectedConfirm}</span>):
+          </label>
+          <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={expectedConfirm}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm font-mono" />
+          <button onClick={doImport} disabled={confirmText.trim() !== expectedConfirm || importing}
+            className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (confirmText.trim() === expectedConfirm && !importing ? "bg-teal-700" : "bg-slate-300")}>
+            {importing ? "Importing…" : `Confirm and import ${parsed.rows.length} rows`}
+          </button>
+        </div>
+      )}
+
+      {result && (
+        <div className={"rounded-lg p-3 " + (result.errors.length ? "bg-rose-50 border border-rose-200" : "bg-emerald-50 border border-emerald-200")}>
+          <p className={"text-sm font-semibold " + (result.errors.length ? "text-rose-700" : "text-emerald-700")}>
+            {result.inserted} row(s) imported{result.errors.length ? `, ${result.errors.length} error(s)` : " successfully"}.
+          </p>
+          {result.errors.map((e, i) => <p key={i} className="text-xs text-rose-600 mt-1">{e}</p>)}
+        </div>
+      )}
     </div>
   );
 }
@@ -1457,6 +1607,7 @@ export default function App() {
                 ))}
                 <button onClick={saveRates} className="mt-1 w-full py-2.5 rounded-lg bg-teal-700 text-white text-sm font-semibold">Save exchange rates</button>
               </div>
+              <ImportCSV incomeCats={incomeCats} expenseCats={expenseCats} onDone={loadAll} />
               <BudgetEditor budgets={budgets} onSave={saveBudgets} expenseCats={expenseCats} />
             </div>
           )}
