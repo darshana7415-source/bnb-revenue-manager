@@ -345,6 +345,25 @@ function RoomEditor({ room, onSave, onAddIncome, onClose }) {
   );
 }
 
+function DrillDown({ label, txns }) {
+  return (
+    <div className="mt-2 mb-3 bg-slate-50 border border-slate-200 rounded-lg p-3">
+      <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">{label} — {txns.length} entr{txns.length === 1 ? "y" : "ies"}</p>
+      {txns.length === 0 ? (
+        <p className="text-xs text-slate-400">No entries found</p>
+      ) : txns.map((t) => (
+        <div key={t.id} className="flex justify-between items-start text-xs py-1.5 border-b border-slate-100 last:border-0 gap-2">
+          <div className="min-w-0">
+            <div className="text-slate-700 truncate">{t.note || t.category}{t.room ? " · Rm " + t.room : ""}</div>
+            <div className="text-slate-400">{t.date} · {t.method}</div>
+          </div>
+          <div className="tabular-nums font-medium text-slate-800 shrink-0">{fmt(t.amount)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function BudgetEditor({ budgets, onSave, expenseCats }) {
   const [draft, setDraft] = useState(budgets);
   const [show, setShow] = useState(false);
@@ -397,6 +416,7 @@ export default function App() {
   const [roomListDraft, setRoomListDraft] = useState("");
   const [reportTab, setReportTab] = useState("daily");
   const [reportDate, setReportDate] = useState(todayStr());
+  const [expandedCat, setExpandedCat] = useState(null); // { scope: 'day'|'month'|'year', type, category }
   const [role, setRole] = useState("staff");
   const [pinInput, setPinInput] = useState("");
   const [showUnlock, setShowUnlock] = useState(false);
@@ -687,10 +707,36 @@ export default function App() {
     return { total, missingCur };
   }, [dayReport.fx, rates]);
 
+  const drillDownTxns = useMemo(() => {
+    if (!expandedCat) return [];
+    const { scope, type, category } = expandedCat;
+    return txns.filter((t) => {
+      if (t.type !== type || t.category !== category) return false;
+      if (t.status === "pending") return false;
+      if ((t.currency || "LKR") !== "LKR") return false;
+      if (!t.date) return false;
+      if (scope === "day") return t.date === reportDate;
+      if (scope === "month") return t.date.startsWith(month);
+      if (scope === "year") return t.date.startsWith(year);
+      return false;
+    }).sort((a, b) => (a.date < b.date ? 1 : -1));
+  }, [expandedCat, txns, reportDate, month, year]);
+
   const monthByCat = useMemo(() => {
     const map = {};
     for (const t of txns) {
       if (!t.date || !t.date.startsWith(month) || t.status === "pending") continue;
+      if ((t.currency || "LKR") !== "LKR") continue;
+      const k = t.type + "|" + t.category;
+      map[k] = (map[k] || 0) + Number(t.amount);
+    }
+    return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
+  }, [txns]);
+
+  const yearByCat = useMemo(() => {
+    const map = {};
+    for (const t of txns) {
+      if (!t.date || !t.date.startsWith(year) || t.status === "pending") continue;
       if ((t.currency || "LKR") !== "LKR") continue;
       const k = t.type + "|" + t.category;
       map[k] = (map[k] || 0) + Number(t.amount);
@@ -727,6 +773,7 @@ export default function App() {
   }, [txns, filter]);
 
   const maxCat = Math.max(1, ...monthByCat.map((c) => c.total));
+  const yearMaxCat = Math.max(1, ...yearByCat.map((c) => c.total));
   const hasCustomView = incomeCats.length + expenseCats.length > 0;
 
   const Nav = ({ id, label, icon }) => (
@@ -1029,11 +1076,19 @@ export default function App() {
                   )}
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
-                    {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map(([cat, v]) => (
-                      <div key={cat} className="flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
-                        <span className="text-slate-600">{cat}</span><span className="font-semibold tabular-nums text-emerald-700">{fmt(v)}</span>
-                      </div>
-                    ))}
+                    {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map(([cat, v]) => {
+                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "income" && expandedCat.category === cat;
+                      return (
+                        <div key={cat}>
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "income", category: cat })}
+                            className="w-full flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0 text-left">
+                            <span className="text-slate-600 flex items-center gap-1">{cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
+                            <span className="font-semibold tabular-nums text-emerald-700">{fmt(v)}</span>
+                          </button>
+                          {isOpen && <DrillDown label={cat} txns={drillDownTxns} />}
+                        </div>
+                      );
+                    })}
                     {dayReport.inc.length > 0 && (
                       <>
                         <div className="flex justify-between text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
@@ -1064,11 +1119,19 @@ export default function App() {
                   </div>
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-rose-700 mb-2">Expenses by category</h2>
-                    {dayReport.exp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses recorded for this day</p> : dayReport.exp.map(([cat, v]) => (
-                      <div key={cat} className="flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
-                        <span className="text-slate-600">{cat}</span><span className="font-semibold tabular-nums text-rose-700">{fmt(v)}</span>
-                      </div>
-                    ))}
+                    {dayReport.exp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses recorded for this day</p> : dayReport.exp.map(([cat, v]) => {
+                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "expense" && expandedCat.category === cat;
+                      return (
+                        <div key={cat}>
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "expense", category: cat })}
+                            className="w-full flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0 text-left">
+                            <span className="text-slate-600 flex items-center gap-1">{cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
+                            <span className="font-semibold tabular-nums text-rose-700">{fmt(v)}</span>
+                          </button>
+                          {isOpen && <DrillDown label={cat} txns={drillDownTxns} />}
+                        </div>
+                      );
+                    })}
                     {dayReport.exp.length > 0 && (
                       <div className="flex justify-between text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
                         <span className="text-slate-800">Total expenses</span><span className="tabular-nums text-rose-700">{fmt(dayReport.te)}</span>
@@ -1148,17 +1211,23 @@ export default function App() {
                     <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
                   )}
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
-                    {monthByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this month yet</p> : monthByCat.map((c) => (
-                      <div key={c.type + c.cat} className="mb-3 last:mb-0">
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-600">{c.cat}</span>
-                          <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                    {monthByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this month yet</p> : monthByCat.map((c) => {
+                      const isOpen = expandedCat && expandedCat.scope === "month" && expandedCat.type === c.type && expandedCat.category === c.cat;
+                      return (
+                        <div key={c.type + c.cat} className="mb-3 last:mb-0">
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "month", type: c.type, category: c.cat })} className="w-full text-left">
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="text-slate-600 flex items-center gap-1">{c.cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
+                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / maxCat) * 100 + "%" }} />
+                            </div>
+                          </button>
+                          {isOpen && <DrillDown label={c.cat} txns={drillDownTxns} />}
                         </div>
-                        <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / maxCat) * 100 + "%" }} />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                   {monthMethodBreakdown.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
@@ -1215,6 +1284,26 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-1 gap-3 mb-3">
                     <StatCard label="Year net — LKR only (after commissions)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear)} />
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
+                    <h2 className="text-sm font-semibold text-slate-800 mb-2">By category — {year}</h2>
+                    {yearByCat.length === 0 ? <p className="text-sm text-slate-400 py-6 text-center">No data for this year yet</p> : yearByCat.map((c) => {
+                      const isOpen = expandedCat && expandedCat.scope === "year" && expandedCat.type === c.type && expandedCat.category === c.cat;
+                      return (
+                        <div key={c.type + c.cat} className="mb-3 last:mb-0">
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "year", type: c.type, category: c.cat })} className="w-full text-left">
+                            <div className="flex justify-between text-xs mb-1">
+                              <span className="text-slate-600 flex items-center gap-1">{c.cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
+                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                            </div>
+                            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / yearMaxCat) * 100 + "%" }} />
+                            </div>
+                          </button>
+                          {isOpen && <DrillDown label={c.cat} txns={drillDownTxns} />}
+                        </div>
+                      );
+                    })}
                   </div>
                   {Object.keys(stats.fx).length > 0 && (
                     <>
