@@ -772,6 +772,25 @@ export default function App() {
     return txns.filter((t) => t.type === filter);
   }, [txns, filter]);
 
+  const filteredByDate = useMemo(() => {
+    const groups = {};
+    for (const t of filtered) {
+      const key = t.date || "Undated";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(t);
+    }
+    return Object.entries(groups)
+      .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+      .map(([date, items]) => {
+        let dayIn = 0, dayOut = 0;
+        for (const t of items) {
+          if (t.status === "pending" || (t.currency || "LKR") !== "LKR") continue;
+          t.type === "income" ? (dayIn += Number(t.amount)) : (dayOut += Number(t.amount));
+        }
+        return { date, items, dayIn, dayOut };
+      });
+  }, [filtered]);
+
   const maxCat = Math.max(1, ...monthByCat.map((c) => c.total));
   const yearMaxCat = Math.max(1, ...yearByCat.map((c) => c.total));
   const hasCustomView = incomeCats.length + expenseCats.length > 0;
@@ -1020,11 +1039,25 @@ export default function App() {
                   <button key={f} onClick={() => setFilter(f)} className={"px-3 py-1.5 rounded-full text-xs font-medium border capitalize " + (filter === f ? "bg-teal-700 text-white border-teal-700" : "bg-white text-slate-600 border-slate-200")}>{f}</button>
                 ))}
               </div>
-              <div className="bg-white rounded-xl border border-slate-200 px-4 py-1">
-                {filtered.length === 0 ? (
-                  <p className="text-sm text-slate-400 py-8 text-center">Nothing here yet</p>
-                ) : filtered.map((t) => <TxnRow key={t.id} t={t} onDelete={deleteTxn} onMarkPaid={markPaid} history={histories[t.id]} onEdit={(id) => { setEditingTxn(txns.find((x) => x.id === id)); setView("add"); }} />)}
-              </div>
+              {filteredByDate.length === 0 ? (
+                <div className="bg-white rounded-xl border border-slate-200 px-4 py-8">
+                  <p className="text-sm text-slate-400 text-center">Nothing here yet</p>
+                </div>
+              ) : filteredByDate.map(({ date, items, dayIn, dayOut }) => (
+                <div key={date} className="mb-3">
+                  <div className="flex items-center justify-between px-1 mb-1.5">
+                    <span className="text-xs font-semibold text-slate-500">{date}</span>
+                    <span className="text-[11px] tabular-nums text-slate-400">
+                      {dayIn > 0 && <span className="text-emerald-600">+{fmt(dayIn)}</span>}
+                      {dayIn > 0 && dayOut > 0 && <span> · </span>}
+                      {dayOut > 0 && <span className="text-rose-500">−{fmt(dayOut)}</span>}
+                    </span>
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 px-4 py-1">
+                    {items.map((t) => <TxnRow key={t.id} t={t} onDelete={deleteTxn} onMarkPaid={markPaid} history={histories[t.id]} onEdit={(id) => { setEditingTxn(txns.find((x) => x.id === id)); setView("add"); }} />)}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
