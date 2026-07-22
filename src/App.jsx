@@ -387,10 +387,34 @@ function normalizeDate(raw) {
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
-  const [confirmText, setConfirmText] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
   const fileRef = useRef(null);
+  const [recentBatches, setRecentBatches] = useState([]);
+  const [undoing, setUndoing] = useState(null);
+
+  const loadRecentBatches = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("import_batch, txn_date, amount")
+      .not("import_batch", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1000);
+    if (error || !data) return;
+    const groups = {};
+    for (const row of data) {
+      if (!groups[row.import_batch]) groups[row.import_batch] = { batch: row.import_batch, count: 0, minDate: row.txn_date, maxDate: row.txn_date };
+      const g = groups[row.import_batch];
+      g.count++;
+      if (row.txn_date < g.minDate) g.minDate = row.txn_date;
+      if (row.txn_date > g.maxDate) g.maxDate = row.txn_date;
+    }
+    setRecentBatches(Object.values(groups).sort((a, b) => (a.batch < b.batch ? 1 : -1)).slice(0, 10));
+  }, []);
+
+  useEffect(() => { loadRecentBatches(); }, [loadRecentBatches]);
+
 
   const analyze = (text) => {
     setResult(null);
@@ -420,7 +444,7 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     });
     const byCat = Object.entries(catTotals).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
     setParsed({ rows, errors: errors.slice(0, 20), errorCount: errors.length, minDate, maxDate, byCat, unknownCats: [...unknownCats] });
-    setConfirmText("");
+    setConfirmed(false);
   };
 
   const handleFile = (e) => {
@@ -434,6 +458,7 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const doImport = async () => {
     if (!parsed || parsed.rows.length === 0) return;
     setImporting(true);
+    const batchId = "import_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
     const batchSize = 200;
     let inserted = 0;
     const errors = [];
@@ -451,20 +476,30 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
         note: r.note || null,
         status: r.status || "paid",
         entered_by: r.entered_by || "admin",
+        import_batch: batchId,
       }));
       const { error } = await supabase.from("transactions").insert(batch);
       if (error) errors.push(error.message);
       else inserted += batch.length;
     }
     setImporting(false);
-    setResult({ inserted, errors });
+    setResult({ inserted, errors, batchId: errors.length === 0 ? batchId : null, minDate: parsed.minDate, maxDate: parsed.maxDate });
     if (errors.length === 0) {
       setRaw(""); setParsed(null);
       onDone();
+      loadRecentBatches();
     }
   };
 
-  const expectedConfirm = parsed && parsed.minDate === parsed.maxDate ? parsed.minDate : `${parsed?.minDate} to ${parsed?.maxDate}`;
+  const undoBatch = async (batchId) => {
+    setUndoing(batchId);
+    const { error } = await supabase.from("transactions").delete().eq("import_batch", batchId);
+    setUndoing(null);
+    if (error) { alert("Error undoing import: " + error.message); return; }
+    if (result && result.batchId === batchId) setResult(null);
+    onDone();
+    loadRecentBatches();
+  };
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
@@ -492,10 +527,13 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
 
       {parsed && parsed.rows.length > 0 && (
         <div className="border border-teal-300 rounded-lg p-3 mb-3 bg-teal-50/40">
-          <p className="text-sm font-semibold text-slate-800 mb-1">{parsed.rows.length} transactions ready to import</p>
-          <p className="text-xs text-slate-600 mb-2">
-            Date range: <span className="font-semibold">{parsed.minDate}</span> to <span className="font-semibold">{parsed.maxDate}</span>
-          </p>
+          <p className="text-sm font-semibold text-slate-800 mb-2">{parsed.rows.length} transactions ready to import</p>
+          <div className="bg-teal-700 text-white rounded-lg px-3 py-3 mb-3 text-center">
+            <p className="text-[10px] uppercase tracking-wide opacity-80 mb-0.5">This import covers</p>
+            <p className="text-base font-bold">
+              {parsed.minDate === parsed.maxDate ? parsed.minDate : `${parsed.minDate}  →  ${parsed.maxDate}`}
+            </p>
+          </div>
           {parsed.unknownCats.length > 0 && (
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-2">
               These categories don't exist yet and will be saved as-is (add them in Settings → Categories if you want them selectable for new entries): {parsed.unknownCats.join(", ")}
@@ -509,24 +547,46 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
               </div>
             ))}
           </div>
-          <label className="block text-xs text-slate-600 mb-1">
-            To confirm, type the date range shown above (<span className="font-mono">{expectedConfirm}</span>):
+          <label className="flex items-start gap-2 mb-3 cursor-pointer">
+            <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} className="mt-0.5" />
+            <span className="text-xs text-slate-700">
+              Yes, <span className="font-semibold">{parsed.minDate === parsed.maxDate ? parsed.minDate : `${parsed.minDate} to ${parsed.maxDate}`}</span> is the correct date range for this import.
+            </span>
           </label>
-          <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={expectedConfirm}
-            className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm font-mono" />
-          <button onClick={doImport} disabled={confirmText.trim() !== expectedConfirm || importing}
-            className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (confirmText.trim() === expectedConfirm && !importing ? "bg-teal-700" : "bg-slate-300")}>
+          <button onClick={doImport} disabled={!confirmed || importing}
+            className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (confirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
             {importing ? "Importing…" : `Confirm and import ${parsed.rows.length} rows`}
           </button>
         </div>
       )}
 
       {result && (
-        <div className={"rounded-lg p-3 " + (result.errors.length ? "bg-rose-50 border border-rose-200" : "bg-emerald-50 border border-emerald-200")}>
+        <div className={"rounded-lg p-3 mb-3 " + (result.errors.length ? "bg-rose-50 border border-rose-200" : "bg-emerald-50 border border-emerald-200")}>
           <p className={"text-sm font-semibold " + (result.errors.length ? "text-rose-700" : "text-emerald-700")}>
             {result.inserted} row(s) imported{result.errors.length ? `, ${result.errors.length} error(s)` : " successfully"}.
           </p>
           {result.errors.map((e, i) => <p key={i} className="text-xs text-rose-600 mt-1">{e}</p>)}
+          {result.batchId && (
+            <button onClick={() => undoBatch(result.batchId)} disabled={undoing === result.batchId}
+              className="mt-2 text-xs font-semibold text-rose-700 border border-rose-300 rounded-lg px-3 py-1.5 bg-white">
+              {undoing === result.batchId ? "Undoing…" : `Undo this import (${result.minDate} to ${result.maxDate})`}
+            </button>
+          )}
+        </div>
+      )}
+
+      {recentBatches.length > 0 && (
+        <div className="border-t border-slate-100 pt-3 mt-1">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Recent imports</p>
+          {recentBatches.map((b) => (
+            <div key={b.batch} className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50 last:border-0">
+              <span className="text-slate-600">{b.minDate === b.maxDate ? b.minDate : `${b.minDate} → ${b.maxDate}`} <span className="text-slate-400">({b.count} rows)</span></span>
+              <button onClick={() => undoBatch(b.batch)} disabled={undoing === b.batch}
+                className="text-[11px] font-semibold text-rose-600 border border-rose-200 rounded px-2 py-1">
+                {undoing === b.batch ? "Undoing…" : "Undo"}
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>
