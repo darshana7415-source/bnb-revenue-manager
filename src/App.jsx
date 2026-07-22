@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Papa from "papaparse";
+import * as XLSX from "xlsx";
 import { supabase } from "./lib/supabaseClient";
 
 const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
@@ -388,6 +389,7 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
   const [confirmed, setConfirmed] = useState(false);
+  const [isExcelFile, setIsExcelFile] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
   const fileRef = useRef(null);
@@ -416,15 +418,14 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   useEffect(() => { loadRecentBatches(); }, [loadRecentBatches]);
 
 
-  const analyze = (text) => {
+  const analyzeRows = (data, fields) => {
     setResult(null);
-    const res = Papa.parse(text.trim(), { header: true, skipEmptyLines: true });
-    const missing = REQUIRED_COLS.filter((c) => !res.meta.fields || !res.meta.fields.includes(c));
+    const missing = REQUIRED_COLS.filter((c) => !fields || !fields.includes(c));
     if (missing.length) {
       setParsed({ rows: [], errors: [`Missing required column(s): ${missing.join(", ")}`], minDate: null, maxDate: null, byCat: [], unknownCats: [] });
       return;
     }
-    const rows = res.data.filter((r) => r.type && r.amount && r.txn_date);
+    const rows = data.filter((r) => r.type && r.amount && r.txn_date);
     const errors = [];
     const allCats = new Set([...incomeCats, ...expenseCats]);
     const unknownCats = new Set();
@@ -447,12 +448,32 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     setConfirmed(false);
   };
 
+  const analyze = (text) => {
+    const res = Papa.parse(text.trim(), { header: true, skipEmptyLines: true });
+    analyzeRows(res.data, res.meta.fields);
+  };
+
   const handleFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => { setRaw(ev.target.result); analyze(ev.target.result); };
-    reader.readAsText(file);
+    const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+    setIsExcelFile(isExcel);
+    if (isExcel) {
+      setRaw(`[Excel file: ${file.name} — preview generated automatically below]`);
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" });
+        const fields = data.length ? Object.keys(data[0]) : [];
+        analyzeRows(data, fields);
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (ev) => { setRaw(ev.target.result); analyze(ev.target.result); };
+      reader.readAsText(file);
+    }
   };
 
   const doImport = async () => {
@@ -503,18 +524,21 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
-      <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions from CSV</h2>
+      <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions from CSV or Excel</h2>
       <p className="text-xs text-slate-500 mb-3">
-        Upload a CSV with columns: type, amount, currency, category, room, guest_event, guest_name, method, txn_date, note, status, entered_by.
+        Upload a .csv or .xlsx file with columns: type, amount, currency, category, room, guest_event, guest_name, method, txn_date, note, status, entered_by.
         You'll see exactly what date range and totals are about to be added before anything is saved.
       </p>
-      <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} className="block w-full text-xs mb-3" />
-      <p className="text-[11px] text-slate-400 mb-3">Or paste CSV text directly:</p>
-      <textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={4} placeholder="type,amount,currency,category,room,guest_event,guest_name,method,txn_date,note,status,entered_by&#10;expense,1500,LKR,Kitchen – General,,,,Cash,2026-07-20,Egg house,paid,admin"
-        className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-xs font-mono" />
-      <button onClick={() => analyze(raw)} disabled={!raw.trim()} className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (raw.trim() ? "bg-teal-700" : "bg-slate-300")}>
-        Preview import
-      </button>
+      <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} className="block w-full text-xs mb-3" />
+      <p className="text-[11px] text-slate-400 mb-3">Or paste CSV text directly (not available for Excel):</p>
+      <textarea value={raw} onChange={(e) => { setRaw(e.target.value); setIsExcelFile(false); }} rows={4} disabled={isExcelFile}
+        placeholder="type,amount,currency,category,room,guest_event,guest_name,method,txn_date,note,status,entered_by&#10;expense,1500,LKR,Kitchen – General,,,,Cash,2026-07-20,Egg house,paid,admin"
+        className={"w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-xs font-mono " + (isExcelFile ? "bg-slate-50 text-slate-400" : "")} />
+      {!isExcelFile && (
+        <button onClick={() => analyze(raw)} disabled={!raw.trim()} className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (raw.trim() ? "bg-teal-700" : "bg-slate-300")}>
+          Preview import
+        </button>
+      )}
 
       {parsed && parsed.errors.length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 mb-3">
