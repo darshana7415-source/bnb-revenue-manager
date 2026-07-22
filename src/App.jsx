@@ -420,12 +420,19 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
 
   const analyzeRows = (data, fields) => {
     setResult(null);
-    const missing = REQUIRED_COLS.filter((c) => !fields || !fields.includes(c));
+    const cleanFields = (fields || []).map((f) => (f || "").trim());
+    const cleanedData = data.map((row) => {
+      const out = {};
+      for (const [k, v] of Object.entries(row)) out[(k || "").trim()] = v;
+      return out;
+    });
+    const missing = REQUIRED_COLS.filter((c) => !cleanFields.includes(c));
     if (missing.length) {
-      setParsed({ rows: [], errors: [`Missing required column(s): ${missing.join(", ")}`], minDate: null, maxDate: null, byCat: [], unknownCats: [] });
+      const found = cleanFields.length ? cleanFields.join(", ") : "(none — the file may be empty, or the header row isn't the first row)";
+      setParsed({ rows: [], errors: [`Missing required column(s): ${missing.join(", ")}`, `Columns found in your file: ${found}`], minDate: null, maxDate: null, byCat: [], unknownCats: [] });
       return;
     }
-    const rows = data.filter((r) => r.type && r.amount && r.txn_date);
+    const rows = cleanedData.filter((r) => r.type && r.amount && r.txn_date);
     const errors = [];
     const allCats = new Set([...incomeCats, ...expenseCats]);
     const unknownCats = new Set();
