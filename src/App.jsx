@@ -1084,10 +1084,31 @@ export default function App() {
 
   const flash = (m) => { setSavedMsg(m); setTimeout(() => setSavedMsg(""), 2000); };
 
+  const fetchAllTransactions = async () => {
+    // Supabase/PostgREST caps a single request at 1000 rows by default.
+    // Page through with .range() so ALL transactions load, not just the most recent 1000.
+    const pageSize = 1000;
+    let from = 0;
+    let all = [];
+    while (true) {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("*")
+        .order("txn_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (error) return { data: null, error };
+      all = all.concat(data || []);
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
+    }
+    return { data: all, error: null };
+  };
+
   const loadAll = useCallback(async () => {
     setLoadError("");
     const [txnsRes, histRes, roomsRes, catsRes, budgetsRes, settingsRes] = await Promise.all([
-      supabase.from("transactions").select("*").order("txn_date", { ascending: false }).order("created_at", { ascending: false }),
+      fetchAllTransactions(),
       supabase.from("transaction_history").select("*").order("changed_at", { ascending: true }),
       supabase.from("rooms").select("*").order("no", { ascending: true }),
       supabase.from("categories").select("*").order("id", { ascending: true }),
