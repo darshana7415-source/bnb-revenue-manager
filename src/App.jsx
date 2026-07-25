@@ -1,7 +1,11 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { supabase } from "./lib/supabaseClient";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
 const CARD_PROVIDERS = ["Com Bank", "DFCC", "NTB", "Global"];
@@ -536,6 +540,70 @@ function rawIncomeCategory(desc) {
 const RAW_COLS = { 2: "income_a", 3: "income_b", 4: "Kitchen", 5: "Bar", 6: "Maintain", 7: "HouseKP", 8: "Other", 9: "Transfers" };
 const RAW_INCOME_KEYS = new Set(["income_a", "income_b"]);
 
+// ===== Payroll PDF parsing engine =====
+const MONTH_NAMES = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+
+async function extractPdfLines(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // group items into lines by rounded y-position, then sort within a line by x
+    const lineMap = new Map();
+    for (const item of content.items) {
+      const y = Math.round(item.transform[5]);
+      const key = Math.round(y / 3) * 3; // tolerance for slight vertical jitter
+      if (!lineMap.has(key)) lineMap.set(key, []);
+      lineMap.get(key).push(item);
+    }
+    const sortedKeys = [...lineMap.keys()].sort((a, b) => b - a); // top of page first
+    const lines = sortedKeys.map((k) =>
+      lineMap.get(k).sort((a, b) => a.transform[4] - b.transform[4]).map((i) => i.str).join(" ").replace(/\s+/g, " ").trim()
+    ).filter(Boolean);
+    pages.push(lines);
+  }
+  return pages; // array of pages, each an array of lines
+}
+
+function parsePayrollPdfPages(pages) {
+  const employees = [];
+  const errors = [];
+  for (const lines of pages) {
+    const fullText = lines.join(" | ");
+    const monthMatch = fullText.match(/pay sheet\s*[–-]\s*(\d{4})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/i);
+    let name = null, position = null, netSalary = null;
+    for (const line of lines) {
+      const nameM = line.match(/^name\s*[-–]\s*(.+)$/i);
+      if (nameM) name = nameM[1].trim();
+      const posM = line.match(/^position\s*[-–]\s*(.+)$/i);
+      if (posM) position = posM[1].trim();
+      const netM = line.match(/net salary\s*[-–]\s*([\d,]+(?:\.\d+)?)/i);
+      if (netM) netSalary = parseFloat(netM[1].replace(/,/g, ""));
+    }
+    if (!name) continue; // not a payslip page (e.g. blank/cover page)
+    if (netSalary === null || netSalary <= 0) {
+      errors.push(`${name}: no net salary found on this page (possibly on leave with no pay) — skipped`);
+      continue;
+    }
+    if (!monthMatch) {
+      errors.push(`${name}: couldn't find "Pay Sheet – YYYY Month" header — skipped`);
+      continue;
+    }
+    const year = parseInt(monthMatch[1], 10);
+    const monthIdx = MONTH_NAMES.indexOf(monthMatch[2].toLowerCase());
+    // salary is paid on the 10th of the FOLLOWING month
+    let payMonth = monthIdx + 1; // 0-indexed source month -> next month (still 0-indexed) is monthIdx+1
+    let payYear = year;
+    if (payMonth > 11) { payMonth = 0; payYear += 1; }
+    const payDate = `${payYear}-${String(payMonth + 1).padStart(2, "0")}-10`;
+    const sourceMonthLabel = monthMatch[2][0].toUpperCase() + monthMatch[2].slice(1) + " " + year;
+    employees.push({ name, position: position || "", netSalary, payDate, sourceMonthLabel });
+  }
+  return { employees, errors };
+}
+
 function processRawSheet(sheetRows, firstDate) {
   // sheetRows: array of arrays (from XLSX sheet_to_json with header:1)
   const headerIdx = [];
@@ -631,7 +699,7 @@ function processRawSheet(sheetRows, firstDate) {
 }
 
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
-  const [mode, setMode] = useState("formatted"); // "formatted" | "raw"
+  const [mode, setMode] = useState("formatted"); // "formatted" | "raw" | "payroll"
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
   const [confirmed, setConfirmed] = useState(false);
@@ -649,6 +717,14 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [rawError, setRawError] = useState("");
   const [rawConfirmed, setRawConfirmed] = useState(false);
   const rawFileRef = useRef(null);
+
+  // payroll PDF mode state
+  const [payrollFile, setPayrollFile] = useState(null);
+  const [payrollResult, setPayrollResult] = useState(null); // { employees, errors }
+  const [payrollError, setPayrollError] = useState("");
+  const [payrollProcessing, setPayrollProcessing] = useState(false);
+  const [payrollConfirmed, setPayrollConfirmed] = useState(false);
+  const payrollFileRef = useRef(null);
 
 
   const loadRecentBatches = useCallback(async () => {
@@ -774,6 +850,57 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     }
   };
 
+  const handlePayrollFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setPayrollFile(file);
+    setPayrollResult(null);
+    setPayrollError("");
+    setPayrollConfirmed(false);
+  };
+
+  const runPayrollProcessing = async () => {
+    if (!payrollFile) return;
+    setPayrollProcessing(true);
+    setPayrollError("");
+    try {
+      const pages = await extractPdfLines(payrollFile);
+      const result = parsePayrollPdfPages(pages);
+      if (result.employees.length === 0) {
+        setPayrollError("Couldn't find any payslips in this PDF. Make sure it's a text-based PDF (not a scanned image).");
+      } else {
+        setPayrollResult(result);
+      }
+    } catch (err) {
+      setPayrollError(err.message || "Couldn't read this PDF.");
+    }
+    setPayrollProcessing(false);
+  };
+
+  const doPayrollImport = async () => {
+    if (!payrollResult || payrollResult.employees.length === 0) return;
+    setImporting(true);
+    const batchId = "import_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    const rows = payrollResult.employees.map((e) => ({
+      type: "expense", amount: e.netSalary, currency: "LKR", category: "Salary",
+      room: null, guest_event: null, guest_name: null, method: "Cash",
+      txn_date: e.payDate, note: `Net salary - ${e.name}${e.position ? " (" + e.position + ")" : ""} - ${e.sourceMonthLabel} payroll`,
+      status: "paid", entered_by: "admin", import_batch: batchId,
+    }));
+    const { error } = await supabase.from("transactions").insert(rows);
+    setImporting(false);
+    if (error) {
+      setResult({ inserted: 0, errors: [error.message], batchId: null });
+      return;
+    }
+    const sortedDates = rows.map((r) => r.txn_date).sort();
+    setResult({ inserted: rows.length, errors: [], batchId, minDate: sortedDates[0], maxDate: sortedDates[sortedDates.length - 1] });
+    setPayrollFile(null); setPayrollResult(null); setPayrollConfirmed(false);
+    if (payrollFileRef.current) payrollFileRef.current.value = "";
+    onDone();
+    loadRecentBatches();
+  };
+
   const handleRawFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -838,11 +965,14 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
       <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions</h2>
       <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
-        <button onClick={() => setMode("raw")} className={"flex-1 py-2 text-xs font-semibold " + (mode === "raw" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
-          Process raw petty cash sheet
+        <button onClick={() => setMode("raw")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "raw" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
+          Raw petty cash sheet
         </button>
-        <button onClick={() => setMode("formatted")} className={"flex-1 py-2 text-xs font-semibold " + (mode === "formatted" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
-          Upload formatted CSV
+        <button onClick={() => setMode("payroll")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "payroll" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
+          Payroll PDF
+        </button>
+        <button onClick={() => setMode("formatted")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "formatted" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
+          Formatted CSV
         </button>
       </div>
 
@@ -921,6 +1051,62 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
               <button onClick={doRawImport} disabled={!rawConfirmed || importing}
                 className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (rawConfirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
                 {importing ? "Importing…" : `Confirm and import ${rawResult.rowsOut.length} rows`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {mode === "payroll" && (
+        <div>
+          <p className="text-xs text-slate-500 mb-3">
+            Upload a monthly payroll PDF (one page per employee). Only the <strong>net salary</strong> gets
+            added — advances and loans shown on the payslip are skipped since they're already recorded as
+            individual entries in the daily petty cash sheets. Each entry is dated the <strong>10th of the
+            following month</strong>, matching when salaries are actually paid.
+          </p>
+          <input ref={payrollFileRef} type="file" accept=".pdf" onChange={handlePayrollFile} className="block w-full text-xs mb-3" />
+          {payrollFile && (
+            <button onClick={runPayrollProcessing} disabled={payrollProcessing}
+              className="w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 bg-teal-700">
+              {payrollProcessing ? "Reading PDF…" : "Process payroll PDF"}
+            </button>
+          )}
+
+          {payrollError && (
+            <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 mb-3">
+              <p className="text-xs font-semibold text-rose-700">{payrollError}</p>
+            </div>
+          )}
+
+          {payrollResult && (
+            <div className="border border-teal-300 rounded-lg p-3 mb-3 bg-teal-50/40">
+              <p className="text-sm font-semibold text-slate-800 mb-2">
+                Found {payrollResult.employees.length} payslip(s)
+              </p>
+              <div className="bg-white rounded-lg p-2 mb-2 max-h-48 overflow-y-auto">
+                {payrollResult.employees.map((e, i) => (
+                  <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-50 last:border-0">
+                    <span className="text-slate-600 truncate">{e.name}{e.position ? " · " + e.position : ""}</span>
+                    <span className="tabular-nums font-medium shrink-0 ml-2">{fmt(e.netSalary)}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs font-semibold text-slate-700 mb-2">
+                Total: {fmt(payrollResult.employees.reduce((s, e) => s + e.netSalary, 0))} — dated {payrollResult.employees[0]?.payDate}
+              </p>
+              {payrollResult.errors.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
+                  {payrollResult.errors.map((e, i) => <p key={i} className="text-[11px] text-amber-700">{e}</p>)}
+                </div>
+              )}
+              <label className="flex items-start gap-2 mb-3 cursor-pointer">
+                <input type="checkbox" checked={payrollConfirmed} onChange={(e) => setPayrollConfirmed(e.target.checked)} className="mt-0.5" />
+                <span className="text-xs text-slate-700">Yes, this looks right — add {payrollResult.employees.length} salary entries.</span>
+              </label>
+              <button onClick={doPayrollImport} disabled={!payrollConfirmed || importing}
+                className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (payrollConfirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
+                {importing ? "Importing…" : `Confirm and import ${payrollResult.employees.length} entries`}
               </button>
             </div>
           )}
@@ -1241,6 +1427,7 @@ export default function App() {
   // ---- derived data ----
   const today = todayStr();
   const month = today.slice(0, 7);
+  const [reportMonth, setReportMonth] = useState(month); // Monthly report tab can browse any past month
 
   const year = today.slice(0, 4);
 
@@ -1293,6 +1480,41 @@ export default function App() {
     }
     return out;
   }, [stats.fx, rates]);
+
+  // Stats for whichever month is selected in the Monthly report (independent of Dashboard's "this month")
+  const monthReportStats = useMemo(() => {
+    let mi = 0, me = 0, bcomMonth = 0, cardComMonth = 0, onlineComMonth = 0;
+    const fx = {};
+    for (const t of txns) {
+      if (t.status === "pending") continue;
+      if (!t.date || !t.date.startsWith(reportMonth)) continue;
+      const v = Number(t.amount) || 0;
+      const cur = t.currency || "LKR";
+      if (cur !== "LKR") {
+        if (!fx[cur]) fx[cur] = { in: 0, out: 0, com: 0 };
+        const fxCom = t.type !== "income" ? 0 : CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
+        t.type === "income" ? (fx[cur].in += v) : (fx[cur].out += v);
+        fx[cur].com += fxCom;
+        continue;
+      }
+      const bcom = t.type === "income" && t.category === BCOM_CAT ? v * BCOM_RATE : 0;
+      const cardCom = t.type === "income" && CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : 0;
+      const onlineCom = t.type === "income" && t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
+      t.type === "income" ? (mi += v) : (me += v);
+      bcomMonth += bcom; cardComMonth += cardCom; onlineComMonth += onlineCom;
+    }
+    return { mi, me, bcomMonth, cardComMonth, onlineComMonth, fx };
+  }, [txns, reportMonth]);
+
+  const fxConvertedReportMonth = useMemo(() => {
+    let total = 0; const missingCur = [];
+    for (const [cur, v] of Object.entries(monthReportStats.fx)) {
+      const rate = rates[cur];
+      if (!rate) { if (v.in) missingCur.push(cur); continue; }
+      total += (v.in - v.out - v.com) * rate;
+    }
+    return { total, missingCur };
+  }, [monthReportStats.fx, rates]);
 
   const roomStats = useMemo(() => {
     const occupied = rooms.filter((r) => r.status === "staying" || r.status === "checkin").length;
@@ -1375,22 +1597,22 @@ export default function App() {
       if ((t.currency || "LKR") !== "LKR") return false;
       if (!t.date) return false;
       if (scope === "day") return t.date === reportDate;
-      if (scope === "month") return t.date.startsWith(month);
+      if (scope === "month") return t.date.startsWith(reportMonth);
       if (scope === "year") return t.date.startsWith(year);
       return false;
     }).sort((a, b) => (a.date < b.date ? 1 : -1));
-  }, [expandedCat, txns, reportDate, month, year]);
+  }, [expandedCat, txns, reportDate, reportMonth, year]);
 
   const monthByCat = useMemo(() => {
     const map = {};
     for (const t of txns) {
-      if (!t.date || !t.date.startsWith(month) || t.status === "pending") continue;
+      if (!t.date || !t.date.startsWith(reportMonth) || t.status === "pending") continue;
       if ((t.currency || "LKR") !== "LKR") continue;
       const k = t.type + "|" + t.category;
       map[k] = (map[k] || 0) + Number(t.amount);
     }
     return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
-  }, [txns]);
+  }, [txns, reportMonth]);
 
   const yearByCat = useMemo(() => {
     const map = {};
@@ -1406,13 +1628,13 @@ export default function App() {
   const monthMethodBreakdown = useMemo(() => {
     const map = {};
     for (const t of txns) {
-      if (!t.date || !t.date.startsWith(month) || t.status === "pending") continue;
+      if (!t.date || !t.date.startsWith(reportMonth) || t.status === "pending") continue;
       if ((t.currency || "LKR") !== "LKR") continue;
       if (!map[t.method]) map[t.method] = { in: 0, out: 0 };
       t.type === "income" ? (map[t.method].in += Number(t.amount)) : (map[t.method].out += Number(t.amount));
     }
     return Object.entries(map).sort((a, b) => b[1].in - a[1].in);
-  }, [txns]);
+  }, [txns, reportMonth]);
 
   const yearMethodBreakdown = useMemo(() => {
     const map = {};
@@ -1883,24 +2105,34 @@ export default function App() {
 
               {reportTab === "monthly" && (
                 <>
+                  <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Showing report for</p>
+                      <p className="text-base font-bold text-slate-800">
+                        {new Date(reportMonth + "-01T00:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                      </p>
+                    </div>
+                    <input type="month" value={reportMonth} onChange={(e) => { setReportMonth(e.target.value); setExpandedCat(null); }}
+                      className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white" />
+                  </div>
                   <div className="grid grid-cols-2 gap-3 mb-3">
-                    <StatCard label="Month income" value={fmt(stats.mi)} tone="up" />
-                    <StatCard label="Month expenses" value={fmt(stats.me)} tone="down" />
-                    <StatCard label="B.com commission (18%)" value={"−" + fmt(stats.bcomMonth)} tone="down" />
-                    <StatCard label="Card commission (3%)" value={"−" + fmt(stats.cardComMonth)} tone="down" />
-                    <StatCard label="Online commission (2%)" value={"−" + fmt(stats.onlineComMonth)} tone="down" />
+                    <StatCard label="Month income" value={fmt(monthReportStats.mi)} tone="up" />
+                    <StatCard label="Month expenses" value={fmt(monthReportStats.me)} tone="down" />
+                    <StatCard label="B.com commission (18%)" value={"−" + fmt(monthReportStats.bcomMonth)} tone="down" />
+                    <StatCard label="Card commission (3%)" value={"−" + fmt(monthReportStats.cardComMonth)} tone="down" />
+                    <StatCard label="Online commission (2%)" value={"−" + fmt(monthReportStats.onlineComMonth)} tone="down" />
                   </div>
                   <div className="grid grid-cols-1 gap-3 mb-3">
-                    <StatCard label="Month net (after commissions)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
+                    <StatCard label="Month net (after commissions)" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth)} />
                   </div>
-                  {Object.keys(stats.fx).length > 0 && (
+                  {Object.keys(monthReportStats.fx).length > 0 && (
                     <div className="grid grid-cols-2 gap-2 mb-3">
-                      <StatCard label="Net — LKR only" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth)} />
-                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(stats.mi - stats.me - stats.bcomMonth - stats.cardComMonth - stats.onlineComMonth + fxConverted.month)} tone="up" />
+                      <StatCard label="Net — LKR only" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth)} />
+                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth + fxConvertedReportMonth.total)} tone="up" />
                     </div>
                   )}
-                  {fxConverted.missingCur.length > 0 && (
-                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
+                  {fxConvertedReportMonth.missingCur.length > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConvertedReportMonth.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
                   )}
                   {(() => {
                     const renderCatRow = (c, scope, scaleMax) => {
