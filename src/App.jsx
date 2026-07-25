@@ -385,7 +385,253 @@ function normalizeDate(raw) {
   return null;
 }
 
+// ===== Raw petty-cash-sheet classification engine (ported from all rules learned this project) =====
+const RAW_INTERNAL_TRANSFER = ["cash from safety box","cash from madam","cash from sir",
+  "cash transferred from safety","cash received from madam","cash receved from madam",
+  "cash from the safety","cash handed over to madam","dulip sir balance","cash from front madam",
+  "cash handed over to chathura","cash hand over to madam","handed over to madam","euro change",
+  "cash receved from safty","cash received from safety","cash exchange"];
+
+const RAW_CATEGORY_RULES = [
+  ["Salary", ["salary advance","salary","salery","navod laon","guest lone","attendence allowance",
+    "attendence incentive","attendence insentive","atendence incentive","attendece incentive",
+    "attendence isentive","chathu advanced","leave payement","lone","advance","etf payment","loan",
+    "shiromi - short","ayesha rent"]],
+  ["Spa Commissions", ["spa dinesh","spa payment","spa treatment","udara spa","wathsala spa",
+    "deep tissue","spa fee","spa udara","spa - wathsala","spa wathsala","spa therapist",
+    "full body massage","spa tretement","spa- outsdie","spa tretment","wathsala","spa for",
+    "wathsala massage","wathsala sps","spa priyani","dinesh spa","spa dimuthu","dulasha spa",
+    "dimuthu spa","spa oil"]],
+  ["Hiring Charges", ["hire","for driver","paid to driver","whale watching tour",
+    "whale watching payment","whales watching payment","whale wach","tour payment","kayak safary",
+    "trackter chagers","galle trip chagers","induruwa chagers","madam tuk","sandun labour",
+    "sandun works","sandun - labour","sandun labour charge","transport"]],
+  ["Kitchen – Staff", ["- staff","pathuma suranga"]],
+  ["Kitchen – Breakfast", ["khb pushpakumara","kbh pushpakumara","eggs home","eggs house",
+    "egg house","pagoma","nalaka","cbl food","finagle lanka","finagal lanka","finagale lanka"]],
+  ["Kitchen – General", ["deshan","p.h.t","fish","meat","manamperi","east west food",
+    "east west pending","lakshan","fruit","vegetable","dms distributors","hopers","abesinha",
+    "abeysingher","kumara","cargills","pyramid wilm","samaranayake distributors","godage agency",
+    "ediriweera stores","w.a.s","was stores","w a s stores","mps traders","seafair","ktc",
+    "gills international","pussalla","pussella","visvaka mark","vishvaka marketing","lgp super",
+    "ruhunu rata farm","freelan","vihara","nimal stores","lakshman stores","s&g trade","s & g trade",
+    "lemon","papadam","smart pack","liyanage stores","piyasiri stores","keels","keells",
+    "new wijethunga","latheenafamily","sohoyuro","sohouro","happy mart","kaburugamuwa","onion",
+    "kitchen need","staff bread","bread - staff","green leaves","visvaka pvt","chaminda super",
+    "sahan","peridot foods","j p trad","jp trading","kgp fresh","food city","m & c enterprises",
+    "s p h priyangika","banana","string hoppers","the mack chocolate","ice cream","fresh milk",
+    "thalapath","calamari","suranga vegi","coconut","gunawardana stores","walgama multi shop",
+    "t k w supplers","beef line","arpico supper","arpico super","king cocanut","ice bag","p&s cake",
+    "soya milk","steam hoppers","jasper food","lime for bar","lime"]],
+  ["Maintenance – AC", ["mindara auto","ac ajith"]],
+  ["Maintenance – General", ["wipula","garbage tract","hardware","wijaya marin","filling station",
+    "petrol","diesel","carpenter","electrical","ever cool","jeewa plastic","garden rope",
+    "w.j.de silva","nanda hardware","gallage","mangala","jayasekara furniture","glass center",
+    "alluminium","tv remort","d tv","dtv recharge","jp traders","waligama cleaning",
+    "weligama cleaning","waligama clean","weligama clean","plumber","pres control","dineth","sadik",
+    "new colour link","damro","meson bass","lanka tile","doctor pool","pool maduranga","granite",
+    "paint","abeywardana","sisurubova","pearl ceramic","janaka paint","aruna tile",
+    "gallage enterprise","nextgen brass","devan trading","sapnaka","mandara auto","light gedara",
+    "lakmal computers","battory","battery","plug points","buddika","buddhika","dulip shopping",
+    "dulip sir for motor"]],
+  ["Housekeeping – General", ["chemical packets","chem product","for laundry","m3m traders",
+    "w k a s walagedara","viswaka marketing","dualink","dual link","suramya communication",
+    "antler industries","muditha","american premimum water","american water","amirican water",
+    "ramco","visse kade","spray","laundry for spa","laudry - spa","laundry - spa",
+    "vindhya chemicals","vindhya cheicals","duly chemicals","neat cleaners"]],
+  ["Guest Laundry", ["guest laundry","laundry outside","laundry - guest","laundry income"]],
+  ["Laundry", ["bright wash","laundry sent out","laundry care","laundry"]],
+  ["Bar", ["nethmina wine","venture beverage","wine stores","rockland distilleries"]],
+  ["Pool Expenses", ["plung pool","plunge pool","pool cool","pool kasun","pool shine","pool -"]],
+  ["Water Bills", ["water board","water bill","water bowser","waterbill"]],
+  ["Electricity Bills", ["ceb ","ceylon electricity","current bill"]],
+  ["Internet Bills", ["dialog","world link","internet bill","router recharge"]],
+  ["Commissions", ["room commission","volter commission","whaleswatching commission",
+    "whale watching commission"]],
+  ["General / Uncategorized", ["security","post office","book shop","refund","boarding fee",
+    "donation","wiharaya","the choice","chamith","flower","polithine","polythine","staff lunch",
+    "staff dinner","coffee capsules","balance given","osanda birthday","kaweesha birthday",
+    "no bill","gemunu pharmacy","matara picture palace","maulana","handunkuru","mawlana",
+    "swasthi medical","pahan thira","lakdinu","laba kade","bihara shop","sriya sycle","sriya cycle",
+    "sudu araliya","l g j super","i g j super","lgj super","kitchen galary","kichen galary",
+    "super bath","for chamith","sadun","sandun","iresh","pick me","curtuns for arawinda",
+    "sb curtain","mpp trading","mpp hire","genaral worker","casual labour","jananga",
+    "deen brothers","savindi","lunch chathu","water bottle broke","broken glass",
+    "ayesha accomadation","room balance paid","rusirimal gift"]],
+];
+
+const RAW_FLAG_PERSONAL = ["for madam","madam ","nipuni shopping","for buddhika",
+  "thanuj patrol go to madam","madam home","dulip shopping","isuri short","yala safary"];
+
+function rawIsPending(desc) {
+  const d = desc.toLowerCase();
+  const hasPendingWord = d.includes("(pending)") || d.includes("pending") || d.includes("prnding");
+  const alreadyPaid = d.includes("paid") || d.includes("(paid)") || d.includes("transferd");
+  return hasPendingWord && !alreadyPaid;
+}
+function rawIsInternal(desc) {
+  const d = desc.toLowerCase();
+  return RAW_INTERNAL_TRANSFER.some((s) => d.includes(s));
+}
+function rawClassifyExpense(desc) {
+  const d = desc.toLowerCase().trim();
+  if (d === "bar") return "Bar";
+  for (const [category, keywords] of RAW_CATEGORY_RULES) {
+    if (keywords.some((k) => d.includes(k))) return category;
+  }
+  return "General / Uncategorized";
+}
+function rawNumval(x) {
+  if (x === null || x === undefined || x === "") return null;
+  if (typeof x === "number") return x;
+  let s = String(x).toLowerCase().replace("lkr", "").replace("usd", "").replace("euro", "").trim();
+  s = s.replace(/oo/g, "00");
+  if (/^\d+,\d{2}$/.test(s)) s = s.replace(",", ".");
+  else s = s.replace(/,/g, "");
+  const v = parseFloat(s);
+  return isNaN(v) ? null : v;
+}
+function rawGetCurrency(x) {
+  if (typeof x === "string") {
+    const xl = x.toLowerCase();
+    if (xl.includes("usd")) return "USD";
+    if (xl.includes("euro")) return "EUR";
+  }
+  return "LKR";
+}
+function rawMethodFor(desc, source) {
+  const d = desc.toLowerCase();
+  if (source === "card") {
+    if (d.includes("global")) return "Global";
+    if (d.includes("dfcc")) return "DFCC";
+    if (d.includes("ntb")) return "NTB";
+    if (d.includes("com pos") || d.includes("pos com") || (" " + d + " ").includes(" com ")) return "Com Bank";
+    if (d.includes("vcc") || d.includes(" vir")) return "Global";
+    if (d.includes("ta transfer") || d.includes("transferred") || d.includes("bank transfer")) return "Bank transfer";
+    return "Cash";
+  }
+  return (d.includes("bank transfer") || d.includes("transferred")) ? "Bank transfer" : "Cash";
+}
+function rawRoomNoFirst(desc) {
+  const m = desc.match(/\b\d{3}\b/);
+  return m ? m[0] : "";
+}
+function rawGuestEvent(desc) {
+  const d = desc.toLowerCase();
+  if (d.includes("checkin") || d.includes("check in") || d.includes("c/in")) return "checkin";
+  if (d.includes("checkout") || d.includes("check out") || d.includes("c/out")) return "checkout";
+  return "";
+}
+function rawIncomeCategory(desc) {
+  const d = desc.toLowerCase();
+  if (d.includes("spa")) return "Spa";
+  if (d.includes("mini bar")) return "Other income";
+  if (d.includes("res bill") || d.includes("resbill")) return "Restaurant";
+  if (d.includes("laundry income")) return "Guest Laundry";
+  if (d.includes("whale watching")) return "Whale Watching";
+  if (d.includes("snorkel")) return "Diving & Snorkeling";
+  return "Room – Direct";
+}
+
+const RAW_COLS = { 2: "income_a", 3: "income_b", 4: "Kitchen", 5: "Bar", 6: "Maintain", 7: "HouseKP", 8: "Other", 9: "Transfers" };
+const RAW_INCOME_KEYS = new Set(["income_a", "income_b"]);
+
+function processRawSheet(sheetRows, firstDate) {
+  // sheetRows: array of arrays (from XLSX sheet_to_json with header:1)
+  const headerIdx = [];
+  sheetRows.forEach((row, i) => {
+    if (row && String(row[1] || "").includes("Petty Cash")) headerIdx.push(i);
+  });
+  if (headerIdx.length === 0) throw new Error("Couldn't find any 'Petty Cash' day headers in this file.");
+
+  const dates = [];
+  const start = new Date(firstDate + "T00:00:00");
+  for (let i = 0; i < headerIdx.length; i++) {
+    const dt = new Date(start);
+    dt.setDate(dt.getDate() + i);
+    dates.push(dt.toISOString().slice(0, 10));
+  }
+
+  const blocks = headerIdx.map((h, i) => [h, i + 1 < headerIdx.length ? headerIdx[i + 1] : sheetRows.length, dates[i]]);
+
+  const allRows = [];
+  for (const [blockStart, blockEnd, date] of blocks) {
+    for (let r = blockStart + 4; r < blockEnd; r++) {
+      const row = sheetRows[r];
+      if (!row) continue;
+      const desc = row[1];
+      if (desc === undefined || desc === null || String(desc).trim() === "") continue;
+      if (String(desc).toUpperCase().includes("DAY CLOSED")) break;
+      if (String(desc).toLowerCase().includes("transferred to safety box")) continue;
+      const vals = {};
+      for (const [c, name] of Object.entries(RAW_COLS)) {
+        const raw = row[Number(c)];
+        const v = rawNumval(raw);
+        if (v !== null) vals[name] = { amount: v, currency: rawGetCurrency(raw) };
+      }
+      const cardRaw = row[11];
+      const cardVal = rawNumval(cardRaw);
+      let cardIncome = null;
+      if (cardVal !== null && !(typeof cardRaw === "string" && cardRaw.trim().toLowerCase() === "received")) {
+        cardIncome = { amount: cardVal, currency: rawGetCurrency(cardRaw) };
+      }
+      allRows.push({ date, desc: String(desc).trim(), vals, cardIncome });
+    }
+  }
+
+  const rowsOut = [];
+  const skippedPending = [];
+  const mixedFlagged = [];
+
+  for (const r of allRows) {
+    const { desc, date, vals, cardIncome } = r;
+    const d = desc.toLowerCase().trim();
+    if (rawIsInternal(d)) continue;
+    if (rawIsPending(d)) { skippedPending.push(r); continue; }
+
+    if (cardIncome && Object.keys(vals).length > 0) { mixedFlagged.push(r); continue; }
+
+    if (cardIncome && Object.keys(vals).length === 0) {
+      rowsOut.push({ type: "income", amount: cardIncome.amount, currency: cardIncome.currency,
+        category: rawIncomeCategory(desc), room: rawRoomNoFirst(desc), guest_event: rawGuestEvent(desc),
+        guest_name: "", method: rawMethodFor(desc, "card"), txn_date: date, note: desc,
+        status: "paid", entered_by: "admin" });
+      continue;
+    }
+
+    if (Object.keys(vals).length === 0) continue;
+    const keys = Object.keys(vals);
+    const isIncomeCols = keys.some((k) => RAW_INCOME_KEYS.has(k));
+
+    if (isIncomeCols) {
+      const byCur = {};
+      for (const k of keys) if (RAW_INCOME_KEYS.has(k)) byCur[vals[k].currency] = (byCur[vals[k].currency] || 0) + vals[k].amount;
+      for (const [cur, amt] of Object.entries(byCur)) {
+        if (amt <= 0) continue;
+        rowsOut.push({ type: "income", amount: Math.round(amt * 100) / 100, currency: cur,
+          category: rawIncomeCategory(desc), room: rawRoomNoFirst(desc), guest_event: rawGuestEvent(desc),
+          guest_name: "", method: rawMethodFor(desc, "cash"), txn_date: date, note: desc,
+          status: "paid", entered_by: "admin" });
+      }
+    } else {
+      const cat = rawClassifyExpense(desc);
+      const flag = RAW_FLAG_PERSONAL.some((k) => d.includes(k)) ? " [FLAG: verify - personal/internal?]" : "";
+      const byCur = {};
+      for (const k of keys) byCur[vals[k].currency] = (byCur[vals[k].currency] || 0) + vals[k].amount;
+      for (const [cur, amt] of Object.entries(byCur)) {
+        if (amt <= 0) continue;
+        rowsOut.push({ type: "expense", amount: Math.round(amt * 100) / 100, currency: cur, category: cat,
+          room: "", guest_event: "", guest_name: "", method: "Cash", txn_date: date, note: desc + flag,
+          status: "paid", entered_by: "admin" });
+      }
+    }
+  }
+
+  return { rowsOut, skippedPending, mixedFlagged, dayCount: headerIdx.length, dateRange: [dates[0], dates[dates.length - 1]] };
+}
+
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
+  const [mode, setMode] = useState("formatted"); // "formatted" | "raw"
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
   const [confirmed, setConfirmed] = useState(false);
@@ -395,6 +641,15 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const fileRef = useRef(null);
   const [recentBatches, setRecentBatches] = useState([]);
   const [undoing, setUndoing] = useState(null);
+
+  // raw-sheet mode state
+  const [rawFile, setRawFile] = useState(null);
+  const [rawFirstDate, setRawFirstDate] = useState("");
+  const [rawResult, setRawResult] = useState(null); // { rowsOut, skippedPending, mixedFlagged, dayCount, dateRange }
+  const [rawError, setRawError] = useState("");
+  const [rawConfirmed, setRawConfirmed] = useState(false);
+  const rawFileRef = useRef(null);
+
 
   const loadRecentBatches = useCallback(async () => {
     const { data, error } = await supabase
@@ -519,6 +774,56 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     }
   };
 
+  const handleRawFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setRawFile(file);
+    setRawResult(null);
+    setRawError("");
+    setRawConfirmed(false);
+  };
+
+  const runRawProcessing = () => {
+    if (!rawFile || !rawFirstDate) return;
+    setRawError("");
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+        const result = processRawSheet(sheetRows, rawFirstDate);
+        setRawResult(result);
+      } catch (err) {
+        setRawError(err.message || "Couldn't process this file.");
+      }
+    };
+    reader.readAsArrayBuffer(rawFile);
+  };
+
+  const doRawImport = async () => {
+    if (!rawResult || rawResult.rowsOut.length === 0) return;
+    setImporting(true);
+    const batchId = "import_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    const batchSize = 200;
+    let inserted = 0;
+    const errors = [];
+    for (let i = 0; i < rawResult.rowsOut.length; i += batchSize) {
+      const batch = rawResult.rowsOut.slice(i, i + batchSize).map((r) => ({ ...r, currency: r.currency || "LKR", import_batch: batchId }));
+      const { error } = await supabase.from("transactions").insert(batch);
+      if (error) errors.push(error.message);
+      else inserted += batch.length;
+    }
+    setImporting(false);
+    setResult({ inserted, errors, batchId: errors.length === 0 ? batchId : null, minDate: rawResult.dateRange[0], maxDate: rawResult.dateRange[1] });
+    if (errors.length === 0) {
+      setRawFile(null); setRawResult(null); setRawFirstDate(""); setRawConfirmed(false);
+      if (rawFileRef.current) rawFileRef.current.value = "";
+      onDone();
+      loadRecentBatches();
+    }
+  };
+
   const undoBatch = async (batchId) => {
     setUndoing(batchId);
     const { error } = await supabase.from("transactions").delete().eq("import_batch", batchId);
@@ -531,7 +836,99 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
-      <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions from CSV or Excel</h2>
+      <h2 className="text-sm font-semibold text-slate-800 mb-1">Import transactions</h2>
+      <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
+        <button onClick={() => setMode("raw")} className={"flex-1 py-2 text-xs font-semibold " + (mode === "raw" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
+          Process raw petty cash sheet
+        </button>
+        <button onClick={() => setMode("formatted")} className={"flex-1 py-2 text-xs font-semibold " + (mode === "formatted" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
+          Upload formatted CSV
+        </button>
+      </div>
+
+      {mode === "raw" && (
+        <div>
+          <p className="text-xs text-slate-500 mb-3">
+            Upload the hotel's raw monthly petty cash Excel file directly — no need to pre-format anything.
+            The app will find each day's transactions, categorize them, and show you a full preview
+            (with anything uncertain clearly flagged) before you confirm.
+          </p>
+          <input ref={rawFileRef} type="file" accept=".xlsx,.xls" onChange={handleRawFile} className="block w-full text-xs mb-3" />
+          {rawFile && (
+            <>
+              <label className="block text-xs text-slate-600 mb-1">What calendar date is the first day-block in this sheet?</label>
+              <input type="date" value={rawFirstDate} onChange={(e) => setRawFirstDate(e.target.value)}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm bg-white" />
+              <button onClick={runRawProcessing} disabled={!rawFirstDate}
+                className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (rawFirstDate ? "bg-teal-700" : "bg-slate-300")}>
+                Process sheet
+              </button>
+            </>
+          )}
+
+          {rawError && (
+            <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 mb-3">
+              <p className="text-xs font-semibold text-rose-700">{rawError}</p>
+            </div>
+          )}
+
+          {rawResult && (
+            <div className="border border-teal-300 rounded-lg p-3 mb-3 bg-teal-50/40">
+              <p className="text-sm font-semibold text-slate-800 mb-1">
+                Found {rawResult.dayCount} day-blocks — {rawResult.rowsOut.length} transactions ready
+              </p>
+              <div className="bg-teal-700 text-white rounded-lg px-3 py-2.5 mb-2 text-center">
+                <p className="text-[10px] uppercase tracking-wide opacity-80 mb-0.5">This import covers</p>
+                <p className="text-base font-bold">{rawResult.dateRange[0]}  →  {rawResult.dateRange[1]}</p>
+              </div>
+              <p className="text-xs text-slate-600 mb-2">
+                {rawResult.skippedPending.length} pending bill(s) excluded (will re-add once paid) ·{" "}
+                {rawResult.mixedFlagged.length} mixed cash+card row(s) need manual entry ·{" "}
+                {rawResult.rowsOut.filter((r) => r.note.includes("FLAG")).length} flagged personal/internal (still included)
+              </p>
+              <div className="bg-white rounded-lg p-2 mb-3 max-h-48 overflow-y-auto">
+                {(() => {
+                  const totals = {};
+                  for (const r of rawResult.rowsOut) {
+                    const key = r.type + "|" + r.category + "|" + r.currency;
+                    totals[key] = (totals[key] || 0) + r.amount;
+                  }
+                  return Object.entries(totals).sort((a, b) => b[1] - a[1]).map(([key, total]) => {
+                    const [type, cat, cur] = key.split("|");
+                    return (
+                      <div key={key} className="flex justify-between text-xs py-0.5">
+                        <span className={type === "income" ? "text-emerald-700" : "text-rose-700"}>{cat} ({cur})</span>
+                        <span className="tabular-nums font-medium">{fmtCur(total, cur)}</span>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+              {rawResult.mixedFlagged.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 mb-3">
+                  <p className="text-[11px] font-semibold text-amber-700 mb-1">Enter these manually — both amounts are real:</p>
+                  {rawResult.mixedFlagged.map((r, i) => (
+                    <p key={i} className="text-[10px] text-amber-800">{r.date}: {r.desc}</p>
+                  ))}
+                </div>
+              )}
+              <label className="flex items-start gap-2 mb-3 cursor-pointer">
+                <input type="checkbox" checked={rawConfirmed} onChange={(e) => setRawConfirmed(e.target.checked)} className="mt-0.5" />
+                <span className="text-xs text-slate-700">
+                  Yes, <span className="font-semibold">{rawResult.dateRange[0]} to {rawResult.dateRange[1]}</span> is the correct date range for this import.
+                </span>
+              </label>
+              <button onClick={doRawImport} disabled={!rawConfirmed || importing}
+                className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (rawConfirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
+                {importing ? "Importing…" : `Confirm and import ${rawResult.rowsOut.length} rows`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {mode === "formatted" && (
+      <div>
       <p className="text-xs text-slate-500 mb-3">
         Upload a .csv or .xlsx file with columns: type, amount, currency, category, room, guest_event, guest_name, method, txn_date, note, status, entered_by.
         You'll see exactly what date range and totals are about to be added before anything is saved.
@@ -589,6 +986,8 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
             {importing ? "Importing…" : `Confirm and import ${parsed.rows.length} rows`}
           </button>
         </div>
+      )}
+      </div>
       )}
 
       {result && (
@@ -1434,11 +1833,11 @@ export default function App() {
                   {dayReport.methods.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                       <h2 className="text-sm font-semibold text-slate-800 mb-2">By payment method</h2>
-                      <div className="grid grid-cols-4 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                      <div className="grid grid-cols-4 gap-x-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
                         <span>Method</span><span className="text-right">In</span><span className="text-right">Out</span><span className="text-right">Net</span>
                       </div>
                       {dayReport.methods.map(([m, v]) => (
-                        <div key={m} className="grid grid-cols-4 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                        <div key={m} className="grid grid-cols-4 gap-x-2 text-xs py-1.5 border-b border-slate-50 last:border-0">
                           <span className="text-slate-600">{m}</span>
                           <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
                           <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
@@ -1539,17 +1938,17 @@ export default function App() {
                   {monthMethodBreakdown.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                       <h2 className="text-sm font-semibold text-slate-800 mb-2">Income by payment method — {month}</h2>
-                      <div className="grid grid-cols-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                      <div className="grid grid-cols-3 gap-x-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
                         <span>Method</span><span className="text-right">Income</span><span className="text-right">Expense</span>
                       </div>
                       {monthMethodBreakdown.map(([m, v]) => (
-                        <div key={m} className="grid grid-cols-3 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                        <div key={m} className="grid grid-cols-3 gap-x-2 text-xs py-1.5 border-b border-slate-50 last:border-0">
                           <span className="text-slate-700 font-medium">{m}</span>
                           <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
                           <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
                         </div>
                       ))}
-                      <div className="grid grid-cols-3 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                      <div className="grid grid-cols-3 gap-x-2 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
                         <span className="text-slate-800">Total</span>
                         <span className="text-right tabular-nums text-emerald-700">{fmt(monthMethodBreakdown.reduce((s, [, v]) => s + v.in, 0))}</span>
                         <span className="text-right tabular-nums text-rose-700">{fmt(monthMethodBreakdown.reduce((s, [, v]) => s + v.out, 0))}</span>
@@ -1651,17 +2050,17 @@ export default function App() {
                   {yearMethodBreakdown.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                       <h2 className="text-sm font-semibold text-slate-800 mb-2">Income by payment method — {year}</h2>
-                      <div className="grid grid-cols-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
+                      <div className="grid grid-cols-3 gap-x-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400 pb-1 border-b border-slate-100">
                         <span>Method</span><span className="text-right">Income</span><span className="text-right">Expense</span>
                       </div>
                       {yearMethodBreakdown.map(([m, v]) => (
-                        <div key={m} className="grid grid-cols-3 text-xs py-1.5 border-b border-slate-50 last:border-0">
+                        <div key={m} className="grid grid-cols-3 gap-x-2 text-xs py-1.5 border-b border-slate-50 last:border-0">
                           <span className="text-slate-700 font-medium">{m}</span>
                           <span className="text-right tabular-nums text-emerald-700">{v.in ? fmt(v.in) : "–"}</span>
                           <span className="text-right tabular-nums text-rose-700">{v.out ? fmt(v.out) : "–"}</span>
                         </div>
                       ))}
-                      <div className="grid grid-cols-3 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
+                      <div className="grid grid-cols-3 gap-x-2 text-xs pt-2 mt-1 border-t border-slate-200 font-semibold">
                         <span className="text-slate-800">Total</span>
                         <span className="text-right tabular-nums text-emerald-700">{fmt(yearMethodBreakdown.reduce((s, [, v]) => s + v.in, 0))}</span>
                         <span className="text-right tabular-nums text-rose-700">{fmt(yearMethodBreakdown.reduce((s, [, v]) => s + v.out, 0))}</span>
