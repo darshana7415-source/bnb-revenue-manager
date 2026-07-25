@@ -1,11 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { supabase } from "./lib/supabaseClient";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 const PAY_METHODS = ["Cash", "Card", "Bank transfer", "Online"];
 const CARD_PROVIDERS = ["Com Bank", "DFCC", "NTB", "Global"];
@@ -540,70 +536,6 @@ function rawIncomeCategory(desc) {
 const RAW_COLS = { 2: "income_a", 3: "income_b", 4: "Kitchen", 5: "Bar", 6: "Maintain", 7: "HouseKP", 8: "Other", 9: "Transfers" };
 const RAW_INCOME_KEYS = new Set(["income_a", "income_b"]);
 
-// ===== Payroll PDF parsing engine =====
-const MONTH_NAMES = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-
-async function extractPdfLines(file) {
-  const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  const pages = [];
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    // group items into lines by rounded y-position, then sort within a line by x
-    const lineMap = new Map();
-    for (const item of content.items) {
-      const y = Math.round(item.transform[5]);
-      const key = Math.round(y / 3) * 3; // tolerance for slight vertical jitter
-      if (!lineMap.has(key)) lineMap.set(key, []);
-      lineMap.get(key).push(item);
-    }
-    const sortedKeys = [...lineMap.keys()].sort((a, b) => b - a); // top of page first
-    const lines = sortedKeys.map((k) =>
-      lineMap.get(k).sort((a, b) => a.transform[4] - b.transform[4]).map((i) => i.str).join(" ").replace(/\s+/g, " ").trim()
-    ).filter(Boolean);
-    pages.push(lines);
-  }
-  return pages; // array of pages, each an array of lines
-}
-
-function parsePayrollPdfPages(pages) {
-  const employees = [];
-  const errors = [];
-  for (const lines of pages) {
-    const fullText = lines.join(" | ");
-    const monthMatch = fullText.match(/pay sheet\s*[–-]\s*(\d{4})\s+(january|february|march|april|may|june|july|august|september|october|november|december)/i);
-    let name = null, position = null, netSalary = null;
-    for (const line of lines) {
-      const nameM = line.match(/^name\s*[-–]\s*(.+)$/i);
-      if (nameM) name = nameM[1].trim();
-      const posM = line.match(/^position\s*[-–]\s*(.+)$/i);
-      if (posM) position = posM[1].trim();
-      const netM = line.match(/net salary\s*[-–]\s*([\d,]+(?:\.\d+)?)/i);
-      if (netM) netSalary = parseFloat(netM[1].replace(/,/g, ""));
-    }
-    if (!name) continue; // not a payslip page (e.g. blank/cover page)
-    if (netSalary === null || netSalary <= 0) {
-      errors.push(`${name}: no net salary found on this page (possibly on leave with no pay) — skipped`);
-      continue;
-    }
-    if (!monthMatch) {
-      errors.push(`${name}: couldn't find "Pay Sheet – YYYY Month" header — skipped`);
-      continue;
-    }
-    const year = parseInt(monthMatch[1], 10);
-    const monthIdx = MONTH_NAMES.indexOf(monthMatch[2].toLowerCase());
-    // salary is paid on the 10th of the FOLLOWING month
-    let payMonth = monthIdx + 1; // 0-indexed source month -> next month (still 0-indexed) is monthIdx+1
-    let payYear = year;
-    if (payMonth > 11) { payMonth = 0; payYear += 1; }
-    const payDate = `${payYear}-${String(payMonth + 1).padStart(2, "0")}-10`;
-    const sourceMonthLabel = monthMatch[2][0].toUpperCase() + monthMatch[2].slice(1) + " " + year;
-    employees.push({ name, position: position || "", netSalary, payDate, sourceMonthLabel });
-  }
-  return { employees, errors };
-}
-
 function processRawSheet(sheetRows, firstDate) {
   // sheetRows: array of arrays (from XLSX sheet_to_json with header:1)
   const headerIdx = [];
@@ -699,7 +631,7 @@ function processRawSheet(sheetRows, firstDate) {
 }
 
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
-  const [mode, setMode] = useState("formatted"); // "formatted" | "raw" | "payroll"
+  const [mode, setMode] = useState("formatted"); // "formatted" | "raw"
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState(null); // { rows, errors, minDate, maxDate, byCat, unknownCats }
   const [confirmed, setConfirmed] = useState(false);
@@ -717,14 +649,6 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [rawError, setRawError] = useState("");
   const [rawConfirmed, setRawConfirmed] = useState(false);
   const rawFileRef = useRef(null);
-
-  // payroll PDF mode state
-  const [payrollFile, setPayrollFile] = useState(null);
-  const [payrollResult, setPayrollResult] = useState(null); // { employees, errors }
-  const [payrollError, setPayrollError] = useState("");
-  const [payrollProcessing, setPayrollProcessing] = useState(false);
-  const [payrollConfirmed, setPayrollConfirmed] = useState(false);
-  const payrollFileRef = useRef(null);
 
 
   const loadRecentBatches = useCallback(async () => {
@@ -850,57 +774,6 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     }
   };
 
-  const handlePayrollFile = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setPayrollFile(file);
-    setPayrollResult(null);
-    setPayrollError("");
-    setPayrollConfirmed(false);
-  };
-
-  const runPayrollProcessing = async () => {
-    if (!payrollFile) return;
-    setPayrollProcessing(true);
-    setPayrollError("");
-    try {
-      const pages = await extractPdfLines(payrollFile);
-      const result = parsePayrollPdfPages(pages);
-      if (result.employees.length === 0) {
-        setPayrollError("Couldn't find any payslips in this PDF. Make sure it's a text-based PDF (not a scanned image).");
-      } else {
-        setPayrollResult(result);
-      }
-    } catch (err) {
-      setPayrollError(err.message || "Couldn't read this PDF.");
-    }
-    setPayrollProcessing(false);
-  };
-
-  const doPayrollImport = async () => {
-    if (!payrollResult || payrollResult.employees.length === 0) return;
-    setImporting(true);
-    const batchId = "import_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-    const rows = payrollResult.employees.map((e) => ({
-      type: "expense", amount: e.netSalary, currency: "LKR", category: "Salary",
-      room: null, guest_event: null, guest_name: null, method: "Cash",
-      txn_date: e.payDate, note: `Net salary - ${e.name}${e.position ? " (" + e.position + ")" : ""} - ${e.sourceMonthLabel} payroll`,
-      status: "paid", entered_by: "admin", import_batch: batchId,
-    }));
-    const { error } = await supabase.from("transactions").insert(rows);
-    setImporting(false);
-    if (error) {
-      setResult({ inserted: 0, errors: [error.message], batchId: null });
-      return;
-    }
-    const sortedDates = rows.map((r) => r.txn_date).sort();
-    setResult({ inserted: rows.length, errors: [], batchId, minDate: sortedDates[0], maxDate: sortedDates[sortedDates.length - 1] });
-    setPayrollFile(null); setPayrollResult(null); setPayrollConfirmed(false);
-    if (payrollFileRef.current) payrollFileRef.current.value = "";
-    onDone();
-    loadRecentBatches();
-  };
-
   const handleRawFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -967,9 +840,6 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
       <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
         <button onClick={() => setMode("raw")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "raw" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
           Raw petty cash sheet
-        </button>
-        <button onClick={() => setMode("payroll")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "payroll" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
-          Payroll PDF
         </button>
         <button onClick={() => setMode("formatted")} className={"flex-1 py-2 text-[11px] font-semibold " + (mode === "formatted" ? "bg-teal-700 text-white" : "bg-white text-slate-600")}>
           Formatted CSV
@@ -1051,62 +921,6 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
               <button onClick={doRawImport} disabled={!rawConfirmed || importing}
                 className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (rawConfirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
                 {importing ? "Importing…" : `Confirm and import ${rawResult.rowsOut.length} rows`}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {mode === "payroll" && (
-        <div>
-          <p className="text-xs text-slate-500 mb-3">
-            Upload a monthly payroll PDF (one page per employee). Only the <strong>net salary</strong> gets
-            added — advances and loans shown on the payslip are skipped since they're already recorded as
-            individual entries in the daily petty cash sheets. Each entry is dated the <strong>10th of the
-            following month</strong>, matching when salaries are actually paid.
-          </p>
-          <input ref={payrollFileRef} type="file" accept=".pdf" onChange={handlePayrollFile} className="block w-full text-xs mb-3" />
-          {payrollFile && (
-            <button onClick={runPayrollProcessing} disabled={payrollProcessing}
-              className="w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 bg-teal-700">
-              {payrollProcessing ? "Reading PDF…" : "Process payroll PDF"}
-            </button>
-          )}
-
-          {payrollError && (
-            <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 mb-3">
-              <p className="text-xs font-semibold text-rose-700">{payrollError}</p>
-            </div>
-          )}
-
-          {payrollResult && (
-            <div className="border border-teal-300 rounded-lg p-3 mb-3 bg-teal-50/40">
-              <p className="text-sm font-semibold text-slate-800 mb-2">
-                Found {payrollResult.employees.length} payslip(s)
-              </p>
-              <div className="bg-white rounded-lg p-2 mb-2 max-h-48 overflow-y-auto">
-                {payrollResult.employees.map((e, i) => (
-                  <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-50 last:border-0">
-                    <span className="text-slate-600 truncate">{e.name}{e.position ? " · " + e.position : ""}</span>
-                    <span className="tabular-nums font-medium shrink-0 ml-2">{fmt(e.netSalary)}</span>
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs font-semibold text-slate-700 mb-2">
-                Total: {fmt(payrollResult.employees.reduce((s, e) => s + e.netSalary, 0))} — dated {payrollResult.employees[0]?.payDate}
-              </p>
-              {payrollResult.errors.length > 0 && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
-                  {payrollResult.errors.map((e, i) => <p key={i} className="text-[11px] text-amber-700">{e}</p>)}
-                </div>
-              )}
-              <label className="flex items-start gap-2 mb-3 cursor-pointer">
-                <input type="checkbox" checked={payrollConfirmed} onChange={(e) => setPayrollConfirmed(e.target.checked)} className="mt-0.5" />
-                <span className="text-xs text-slate-700">Yes, this looks right — add {payrollResult.employees.length} salary entries.</span>
-              </label>
-              <button onClick={doPayrollImport} disabled={!payrollConfirmed || importing}
-                className={"w-full py-3 rounded-lg text-sm font-semibold text-white " + (payrollConfirmed && !importing ? "bg-teal-700" : "bg-slate-300")}>
-                {importing ? "Importing…" : `Confirm and import ${payrollResult.employees.length} entries`}
               </button>
             </div>
           )}
