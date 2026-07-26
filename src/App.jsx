@@ -32,7 +32,10 @@ const fmtCur = (n, currency) => {
   if (cur === "LKR") return sym + " " + Math.round(n || 0).toLocaleString("en-LK");
   return sym + " " + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 const isRoomCat = (c) => c && c.startsWith("Room");
 
 // ---- Supabase <-> app-shape mapping ----
@@ -546,10 +549,11 @@ function processRawSheet(sheetRows, firstDate) {
 
   const dates = [];
   const start = new Date(firstDate + "T00:00:00");
+  const toLocalYMD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   for (let i = 0; i < headerIdx.length; i++) {
     const dt = new Date(start);
     dt.setDate(dt.getDate() + i);
-    dates.push(dt.toISOString().slice(0, 10));
+    dates.push(toLocalYMD(dt));
   }
 
   const blocks = headerIdx.map((h, i) => [h, i + 1 < headerIdx.length ? headerIdx[i + 1] : sheetRows.length, dates[i]]);
