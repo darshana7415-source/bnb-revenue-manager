@@ -393,7 +393,8 @@ const RAW_INTERNAL_TRANSFER = ["cash from safety box","cash from madam","cash fr
   "cash transferred from safety","cash received from madam","cash receved from madam",
   "cash from the safety","cash handed over to madam","dulip sir balance","cash from front madam",
   "cash handed over to chathura","cash hand over to madam","handed over to madam","euro change",
-  "cash receved from safty","cash received from safety","cash exchange"];
+  "cash receved from safty","cash received from safety","cash exchange",
+  "hand over to madam","handed overto madam","hand over to chathura"];
 
 const RAW_CATEGORY_RULES = [
   ["Salary", ["salary advance","salary","salery","navod laon","guest lone","attendence allowance",
