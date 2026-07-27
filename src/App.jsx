@@ -1937,11 +1937,6 @@ export default function App() {
                             <span className="text-emerald-700 tabular-nums">+{fmtCur(v.in, cur).replace(/^\D+\s?/, "")}</span>
                             <span className="text-rose-700 tabular-nums">−{fmtCur(v.out, cur).replace(/^\D+\s?/, "")}</span>
                           </div>
-                          {Object.entries(v.catInc).sort((a, b) => b[1] - a[1]).map(([cat, amt]) => (
-                            <div key={cat} className="flex justify-between text-[11px] text-slate-500 py-0.5 pl-2">
-                              <span>{cat}</span><span className="tabular-nums">{fmtCur(amt, cur).replace(/^\D+\s?/, "")}</span>
-                            </div>
-                          ))}
                           {v.com > 0 && (
                             <div className="flex items-center justify-between text-[11px] text-orange-700 mt-1">
                               <span>Card/Online commission</span>
