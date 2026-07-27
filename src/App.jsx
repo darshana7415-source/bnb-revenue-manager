@@ -1386,35 +1386,36 @@ export default function App() {
   }, [budgets, monthExpenseByCat]);
 
   const dayReport = useMemo(() => {
-    const inc = {}, exp = {}, methods = {}, fx = {};
+    const catMap = {}, methods = {}, fx = {};
     let ti = 0, te = 0, pendCount = 0, bcom = 0, cardCom = 0, onlineCom = 0;
     for (const t of txns) {
       if (t.date !== reportDate) continue;
       const v = Number(t.amount) || 0;
       const cur = t.currency || "LKR";
       if (t.status === "pending") { pendCount++; continue; }
+      const k = t.type + "|" + t.category + "|" + cur;
+      catMap[k] = (catMap[k] || 0) + v;
       if (cur !== "LKR") {
-        if (!fx[cur]) fx[cur] = { in: 0, out: 0, com: 0, catInc: {} };
+        if (!fx[cur]) fx[cur] = { in: 0, out: 0, com: 0 };
         t.type === "income" ? (fx[cur].in += v) : (fx[cur].out += v);
         if (t.type === "income") {
           if (CARD_PROVIDERS.includes(t.method)) fx[cur].com += v * CARD_COMMISSION_RATE;
           if (t.method === "Online") fx[cur].com += v * ONLINE_COMMISSION_RATE;
-          fx[cur].catInc[t.category] = (fx[cur].catInc[t.category] || 0) + v;
         }
         continue;
       }
       if (t.type === "income") {
-        inc[t.category] = (inc[t.category] || 0) + v; ti += v;
+        ti += v;
         if (t.category === BCOM_CAT) bcom += v * BCOM_RATE;
         if (CARD_PROVIDERS.includes(t.method)) cardCom += v * CARD_COMMISSION_RATE;
         if (t.method === "Online") onlineCom += v * ONLINE_COMMISSION_RATE;
       }
-      else { exp[t.category] = (exp[t.category] || 0) + v; te += v; }
+      else { te += v; }
       if (!methods[t.method]) methods[t.method] = { in: 0, out: 0 };
       t.type === "income" ? (methods[t.method].in += v) : (methods[t.method].out += v);
     }
-    const sort = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]);
-    return { inc: sort(inc), exp: sort(exp), ti, te, bcom, cardCom, onlineCom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
+    const catRows = Object.entries(catMap).map(([k, v]) => { const [type, cat, cur] = k.split("|"); return { type, cat, currency: cur, total: v }; }).sort((a, b) => b.total - a.total);
+    return { inc: catRows.filter((c) => c.type === "income"), exp: catRows.filter((c) => c.type === "expense"), ti, te, bcom, cardCom, onlineCom, methods: Object.entries(methods), pendCount, fx: Object.entries(fx) };
   }, [txns, reportDate]);
 
   const dayFxConverted = useMemo(() => {
@@ -1429,11 +1430,12 @@ export default function App() {
 
   const drillDownTxns = useMemo(() => {
     if (!expandedCat) return [];
-    const { scope, type, category } = expandedCat;
+    const { scope, type, category, currency } = expandedCat;
     return txns.filter((t) => {
       if (t.type !== type || t.category !== category) return false;
       if (t.status === "pending") return false;
-      if ((t.currency || "LKR") !== "LKR") return false;
+      if (currency !== undefined && (t.currency || "LKR") !== currency) return false;
+      if (currency === undefined && (t.currency || "LKR") !== "LKR") return false;
       if (!t.date) return false;
       if (scope === "day") return t.date === reportDate;
       if (scope === "month") return t.date.startsWith(reportMonth);
@@ -1446,23 +1448,23 @@ export default function App() {
     const map = {};
     for (const t of txns) {
       if (!t.date || !t.date.startsWith(reportMonth) || t.status === "pending") continue;
-      if ((t.currency || "LKR") !== "LKR") continue;
-      const k = t.type + "|" + t.category;
+      const cur = t.currency || "LKR";
+      const k = t.type + "|" + t.category + "|" + cur;
       map[k] = (map[k] || 0) + Number(t.amount);
     }
-    return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
+    return Object.entries(map).map(([k, v]) => { const [type, cat, cur] = k.split("|"); return { type, cat, currency: cur, total: v }; }).sort((a, b) => b.total - a.total);
   }, [txns, reportMonth]);
 
   const yearByCat = useMemo(() => {
     const map = {};
     for (const t of txns) {
       if (!t.date || !t.date.startsWith(year) || t.status === "pending") continue;
-      if ((t.currency || "LKR") !== "LKR") continue;
-      const k = t.type + "|" + t.category;
+      const cur = t.currency || "LKR";
+      const k = t.type + "|" + t.category + "|" + cur;
       map[k] = (map[k] || 0) + Number(t.amount);
     }
-    return Object.entries(map).map(([k, v]) => { const [type, cat] = k.split("|"); return { type, cat, total: v }; }).sort((a, b) => b.total - a.total);
-  }, [txns]);
+    return Object.entries(map).map(([k, v]) => { const [type, cat, cur] = k.split("|"); return { type, cat, currency: cur, total: v }; }).sort((a, b) => b.total - a.total);
+  }, [txns, year]);
 
   const monthMethodBreakdown = useMemo(() => {
     const map = {};
@@ -1511,8 +1513,16 @@ export default function App() {
       });
   }, [filtered]);
 
-  const maxCat = Math.max(1, ...monthByCat.map((c) => c.total));
-  const yearMaxCat = Math.max(1, ...yearByCat.map((c) => c.total));
+  const maxCatByCur = useMemo(() => {
+    const m = {};
+    for (const c of monthByCat) m[c.currency] = Math.max(m[c.currency] || 1, c.total);
+    return m;
+  }, [monthByCat]);
+  const yearMaxCatByCur = useMemo(() => {
+    const m = {};
+    for (const c of yearByCat) m[c.currency] = Math.max(m[c.currency] || 1, c.total);
+    return m;
+  }, [yearByCat]);
   const hasCustomView = incomeCats.length + expenseCats.length > 0;
 
   const Nav = ({ id, label, icon }) => (
@@ -1814,14 +1824,13 @@ export default function App() {
                     {reportDate !== today && <button onClick={() => setReportDate(today)} className="text-xs text-teal-700 font-medium border border-teal-200 rounded-lg px-3 py-2">Today</button>}
                   </div>
                   <div className="grid grid-cols-3 gap-2 mb-3">
-                    <StatCard label="Income" value={fmt(dayReport.ti)} tone="up" />
-                    <StatCard label="Expenses" value={fmt(dayReport.te)} tone="down" />
-                    <StatCard label="Net (after commissions)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
+                    <StatCard label="Income (LKR)" value={fmt(dayReport.ti)} tone="up" />
+                    <StatCard label="Expenses (LKR)" value={fmt(dayReport.te)} tone="down" />
+                    <StatCard label="Net profit (all currencies, in LKR)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom + dayFxConverted.total)} tone="up" />
                   </div>
                   {dayReport.fx.length > 0 && (
-                    <div className="grid grid-cols-2 gap-2 mb-3">
-                      <StatCard label="Net — LKR only" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
-                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom + dayFxConverted.total)} tone="up" />
+                    <div className="grid grid-cols-1 gap-2 mb-3">
+                      <StatCard label="Net — LKR only, for reference" value={fmt(dayReport.ti - dayReport.te - dayReport.bcom - dayReport.cardCom - dayReport.onlineCom)} />
                     </div>
                   )}
                   {dayFxConverted.missingCur.length > 0 && (
@@ -1829,16 +1838,20 @@ export default function App() {
                   )}
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
-                    {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map(([cat, v]) => {
-                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "income" && expandedCat.category === cat;
+                    {dayReport.inc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income recorded for this day</p> : dayReport.inc.map((c) => {
+                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "income" && expandedCat.category === c.cat && expandedCat.currency === c.currency;
                       return (
-                        <div key={cat}>
-                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "income", category: cat })}
+                        <div key={c.cat + c.currency}>
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "income", category: c.cat, currency: c.currency })}
                             className="w-full flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0 text-left">
-                            <span className="text-slate-600 flex items-center gap-1">{cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
-                            <span className="font-semibold tabular-nums text-emerald-700">{fmt(v)}</span>
+                            <span className="text-slate-600 flex items-center gap-1">
+                              {c.cat}
+                              {c.currency !== "LKR" && <span className="text-[10px] bg-slate-100 text-slate-500 rounded px-1 py-0.5">{c.currency}</span>}
+                              <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span>
+                            </span>
+                            <span className="font-semibold tabular-nums text-emerald-700">{fmtCur(c.total, c.currency)}</span>
                           </button>
-                          {isOpen && <DrillDown label={cat} txns={drillDownTxns} />}
+                          {isOpen && <DrillDown label={c.cat} txns={drillDownTxns} />}
                         </div>
                       );
                     })}
@@ -1872,16 +1885,20 @@ export default function App() {
                   </div>
                   <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                     <h2 className="text-sm font-semibold text-rose-700 mb-2">Expenses by category</h2>
-                    {dayReport.exp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses recorded for this day</p> : dayReport.exp.map(([cat, v]) => {
-                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "expense" && expandedCat.category === cat;
+                    {dayReport.exp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses recorded for this day</p> : dayReport.exp.map((c) => {
+                      const isOpen = expandedCat && expandedCat.scope === "day" && expandedCat.type === "expense" && expandedCat.category === c.cat && expandedCat.currency === c.currency;
                       return (
-                        <div key={cat}>
-                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "expense", category: cat })}
+                        <div key={c.cat + c.currency}>
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope: "day", type: "expense", category: c.cat, currency: c.currency })}
                             className="w-full flex justify-between text-xs py-1.5 border-b border-slate-50 last:border-0 text-left">
-                            <span className="text-slate-600 flex items-center gap-1">{cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
-                            <span className="font-semibold tabular-nums text-rose-700">{fmt(v)}</span>
+                            <span className="text-slate-600 flex items-center gap-1">
+                              {c.cat}
+                              {c.currency !== "LKR" && <span className="text-[10px] bg-slate-100 text-slate-500 rounded px-1 py-0.5">{c.currency}</span>}
+                              <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span>
+                            </span>
+                            <span className="font-semibold tabular-nums text-rose-700">{fmtCur(c.total, c.currency)}</span>
                           </button>
-                          {isOpen && <DrillDown label={cat} txns={drillDownTxns} />}
+                          {isOpen && <DrillDown label={c.cat} txns={drillDownTxns} />}
                         </div>
                       );
                     })}
@@ -1962,26 +1979,30 @@ export default function App() {
                     <StatCard label="Online commission (2%)" value={"−" + fmt(monthReportStats.onlineComMonth)} tone="down" />
                   </div>
                   <div className="grid grid-cols-1 gap-3 mb-3">
-                    <StatCard label="Month net (after commissions)" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth)} />
+                    <StatCard label="Month net profit (all currencies, in LKR)" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth + fxConvertedReportMonth.total)} tone="up" />
                   </div>
                   {Object.keys(monthReportStats.fx).length > 0 && (
-                    <div className="grid grid-cols-2 gap-2 mb-3">
-                      <StatCard label="Net — LKR only" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth)} />
-                      <StatCard label="Net — LKR + foreign (converted)" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth + fxConvertedReportMonth.total)} tone="up" />
+                    <div className="grid grid-cols-1 gap-2 mb-3">
+                      <StatCard label="Net — LKR only, for reference" value={fmt(monthReportStats.mi - monthReportStats.me - monthReportStats.bcomMonth - monthReportStats.cardComMonth - monthReportStats.onlineComMonth)} />
                     </div>
                   )}
                   {fxConvertedReportMonth.missingCur.length > 0 && (
                     <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConvertedReportMonth.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
                   )}
                   {(() => {
-                    const renderCatRow = (c, scope, scaleMax) => {
-                      const isOpen = expandedCat && expandedCat.scope === scope && expandedCat.type === c.type && expandedCat.category === c.cat;
+                    const renderCatRow = (c, scope) => {
+                      const isOpen = expandedCat && expandedCat.scope === scope && expandedCat.type === c.type && expandedCat.category === c.cat && expandedCat.currency === c.currency;
+                      const scaleMax = maxCatByCur[c.currency] || 1;
                       return (
-                        <div key={c.type + c.cat} className="mb-3 last:mb-0">
-                          <button onClick={() => setExpandedCat(isOpen ? null : { scope, type: c.type, category: c.cat })} className="w-full text-left">
+                        <div key={c.type + c.cat + c.currency} className="mb-3 last:mb-0">
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope, type: c.type, category: c.cat, currency: c.currency })} className="w-full text-left">
                             <div className="flex justify-between text-xs mb-1">
-                              <span className="text-slate-600 flex items-center gap-1">{c.cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
-                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                              <span className="text-slate-600 flex items-center gap-1">
+                                {c.cat}
+                                {c.currency !== "LKR" && <span className="text-[10px] bg-slate-100 text-slate-500 rounded px-1 py-0.5">{c.currency}</span>}
+                                <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span>
+                              </span>
+                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmtCur(c.total, c.currency)}</span>
                             </div>
                             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                               <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / scaleMax) * 100 + "%" }} />
@@ -1997,11 +2018,11 @@ export default function App() {
                       <>
                         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                           <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category</h2>
-                          {monthInc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income this month</p> : monthInc.map((c) => renderCatRow(c, "month", maxCat))}
+                          {monthInc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income this month</p> : monthInc.map((c) => renderCatRow(c, "month"))}
                         </div>
                         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                           <h2 className="text-sm font-semibold text-rose-700 mb-2">Expenses by category</h2>
-                          {monthExp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses this month</p> : monthExp.map((c) => renderCatRow(c, "month", maxCat))}
+                          {monthExp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses this month</p> : monthExp.map((c) => renderCatRow(c, "month"))}
                         </div>
                       </>
                     );
@@ -2060,17 +2081,30 @@ export default function App() {
                     <StatCard label="Card + Online commission" value={"−" + fmt(stats.cardComYear + stats.onlineComYear)} tone="down" />
                   </div>
                   <div className="grid grid-cols-1 gap-3 mb-3">
-                    <StatCard label="Year net — LKR only (after commissions)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear)} />
+                    <StatCard label="Year net profit (all currencies, in LKR)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear + fxConverted.year)} tone="up" />
                   </div>
+                  {Object.keys(stats.fx).length > 0 && (
+                    <div className="grid grid-cols-1 gap-2 mb-3">
+                      <StatCard label="Net — LKR only, for reference" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear)} />
+                    </div>
+                  )}
+                  {fxConverted.missingCur.length > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
+                  )}
                   {(() => {
-                    const renderCatRow = (c, scope, scaleMax) => {
-                      const isOpen = expandedCat && expandedCat.scope === scope && expandedCat.type === c.type && expandedCat.category === c.cat;
+                    const renderCatRow = (c, scope) => {
+                      const isOpen = expandedCat && expandedCat.scope === scope && expandedCat.type === c.type && expandedCat.category === c.cat && expandedCat.currency === c.currency;
+                      const scaleMax = yearMaxCatByCur[c.currency] || 1;
                       return (
-                        <div key={c.type + c.cat} className="mb-3 last:mb-0">
-                          <button onClick={() => setExpandedCat(isOpen ? null : { scope, type: c.type, category: c.cat })} className="w-full text-left">
+                        <div key={c.type + c.cat + c.currency} className="mb-3 last:mb-0">
+                          <button onClick={() => setExpandedCat(isOpen ? null : { scope, type: c.type, category: c.cat, currency: c.currency })} className="w-full text-left">
                             <div className="flex justify-between text-xs mb-1">
-                              <span className="text-slate-600 flex items-center gap-1">{c.cat} <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span></span>
-                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmt(c.total)}</span>
+                              <span className="text-slate-600 flex items-center gap-1">
+                                {c.cat}
+                                {c.currency !== "LKR" && <span className="text-[10px] bg-slate-100 text-slate-500 rounded px-1 py-0.5">{c.currency}</span>}
+                                <span className="text-slate-300">{isOpen ? "▲" : "▾"}</span>
+                              </span>
+                              <span className={"font-semibold tabular-nums " + (c.type === "income" ? "text-emerald-700" : "text-rose-700")}>{fmtCur(c.total, c.currency)}</span>
                             </div>
                             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                               <div className={"h-full rounded-full " + (c.type === "income" ? "bg-emerald-500" : "bg-rose-400")} style={{ width: (c.total / scaleMax) * 100 + "%" }} />
@@ -2086,23 +2120,16 @@ export default function App() {
                       <>
                         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                           <h2 className="text-sm font-semibold text-emerald-700 mb-2">Income by category — {year}</h2>
-                          {yearInc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income this year</p> : yearInc.map((c) => renderCatRow(c, "year", yearMaxCat))}
+                          {yearInc.length === 0 ? <p className="text-xs text-slate-400 py-2">No income this year</p> : yearInc.map((c) => renderCatRow(c, "year"))}
                         </div>
                         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                           <h2 className="text-sm font-semibold text-rose-700 mb-2">Expenses by category — {year}</h2>
-                          {yearExp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses this year</p> : yearExp.map((c) => renderCatRow(c, "year", yearMaxCat))}
+                          {yearExp.length === 0 ? <p className="text-xs text-slate-400 py-2">No expenses this year</p> : yearExp.map((c) => renderCatRow(c, "year"))}
                         </div>
                       </>
                     );
                   })()}
                   {Object.keys(stats.fx).length > 0 && (
-                    <>
-                      <div className="grid grid-cols-1 gap-3 mb-3">
-                        <StatCard label="Year net — LKR + foreign (converted)" value={fmt(stats.yi - stats.ye - stats.bcomYear - stats.cardComYear - stats.onlineComYear + fxConverted.year)} tone="up" />
-                      </div>
-                      {fxConverted.missingCur.length > 0 && (
-                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">No exchange rate set for {fxConverted.missingCur.join(", ")} — set it in Settings to include it in the combined figure.</p>
-                      )}
                       <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
                         <h2 className="text-sm font-semibold text-slate-800 mb-2">Foreign currency income — {year} (not converted)</h2>
                         {Object.entries(stats.fx).map(([cur, v]) => (
@@ -2116,7 +2143,6 @@ export default function App() {
                           </div>
                         ))}
                       </div>
-                    </>
                   )}
                   {yearMethodBreakdown.length > 0 && (
                     <div className="bg-white rounded-xl border border-slate-200 p-4 mb-3">
