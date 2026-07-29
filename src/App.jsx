@@ -534,56 +534,23 @@ function rawIncomeCategory(desc) {
   if (d.includes("laundry income")) return "Guest Laundry";
   if (d.includes("whale watching")) return "Whale Watching";
   if (d.includes("snorkel")) return "Diving & Snorkeling";
+  // Genuine room charge -- figure out which booking channel it came through.
+  // Check specific OTA brand names first (these get their own category and,
+  // in Booking.com's case, the 18% commission calc); "TA transfer" or the
+  // word "agent" catches any named travel agency (Holiday Lanka, EDT, etc.)
+  // which all fold into one Agent Booking category rather than one per agency.
+  if (d.includes("booking com") || d.includes("booking.com")) return "Room – Booking.com";
+  if (d.includes("expedia")) return "Room – Expedia";
+  if (d.includes("go mmt") || d.includes("gommt") || d.includes(" mmt")) return "Room – Go-MMT";
+  if (d.includes("agoda")) return "Room – Agoda";
+  if (d.includes("ta transfer") || d.includes("travel agent")) return "Room – Agent Booking";
   return "Room – Direct";
 }
 
 const RAW_COLS = { 2: "income_a", 3: "income_b", 4: "Kitchen", 5: "Bar", 6: "Maintain", 7: "HouseKP", 8: "Other", 9: "Transfers" };
 const RAW_INCOME_KEYS = new Set(["income_a", "income_b"]);
 
-function processRawSheet(sheetRows, firstDate) {
-  // sheetRows: array of arrays (from XLSX sheet_to_json with header:1)
-  const headerIdx = [];
-  sheetRows.forEach((row, i) => {
-    if (row && String(row[1] || "").includes("Petty Cash")) headerIdx.push(i);
-  });
-  if (headerIdx.length === 0) throw new Error("Couldn't find any 'Petty Cash' day headers in this file.");
-
-  const dates = [];
-  const start = new Date(firstDate + "T00:00:00");
-  const toLocalYMD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  for (let i = 0; i < headerIdx.length; i++) {
-    const dt = new Date(start);
-    dt.setDate(dt.getDate() + i);
-    dates.push(toLocalYMD(dt));
-  }
-
-  const blocks = headerIdx.map((h, i) => [h, i + 1 < headerIdx.length ? headerIdx[i + 1] : sheetRows.length, dates[i]]);
-
-  const allRows = [];
-  for (const [blockStart, blockEnd, date] of blocks) {
-    for (let r = blockStart + 4; r < blockEnd; r++) {
-      const row = sheetRows[r];
-      if (!row) continue;
-      const desc = row[1];
-      if (desc === undefined || desc === null || String(desc).trim() === "") continue;
-      if (String(desc).toUpperCase().includes("DAY CLOSED")) break;
-      if (String(desc).toLowerCase().includes("transferred to safety box")) continue;
-      const vals = {};
-      for (const [c, name] of Object.entries(RAW_COLS)) {
-        const raw = row[Number(c)];
-        const v = rawNumval(raw);
-        if (v !== null) vals[name] = { amount: v, currency: rawGetCurrency(raw) };
-      }
-      const cardRaw = row[11];
-      const cardVal = rawNumval(cardRaw);
-      let cardIncome = null;
-      if (cardVal !== null && !(typeof cardRaw === "string" && cardRaw.trim().toLowerCase() === "received")) {
-        cardIncome = { amount: cardVal, currency: rawGetCurrency(cardRaw) };
-      }
-      allRows.push({ date, desc: String(desc).trim(), vals, cardIncome });
-    }
-  }
-
+function classifyExtractedRows(allRows) {
   const rowsOut = [];
   const skippedPending = [];
   const mixedFlagged = [];
@@ -631,9 +598,71 @@ function processRawSheet(sheetRows, firstDate) {
       }
     }
   }
+  return { rowsOut, skippedPending, mixedFlagged };
+}
 
+function extractRowsFromSheetBlock(sheetRows, blockStart, blockEnd, date) {
+  const rows = [];
+  for (let r = blockStart; r < blockEnd; r++) {
+    const row = sheetRows[r];
+    if (!row) continue;
+    const desc = row[1];
+    if (desc === undefined || desc === null || String(desc).trim() === "") continue;
+    if (String(desc).toUpperCase().includes("DAY CLOSED")) break;
+    if (String(desc).toLowerCase().includes("transferred to safety box")) continue;
+    const vals = {};
+    for (const [c, name] of Object.entries(RAW_COLS)) {
+      const raw = row[Number(c)];
+      const v = rawNumval(raw);
+      if (v !== null) vals[name] = { amount: v, currency: rawGetCurrency(raw) };
+    }
+    const cardRaw = row[11];
+    const cardVal = rawNumval(cardRaw);
+    let cardIncome = null;
+    if (cardVal !== null && !(typeof cardRaw === "string" && cardRaw.trim().toLowerCase() === "received")) {
+      cardIncome = { amount: cardVal, currency: rawGetCurrency(cardRaw) };
+    }
+    rows.push({ date, desc: String(desc).trim(), vals, cardIncome });
+  }
+  return rows;
+}
+
+function processRawSheet(sheetRows, firstDate) {
+  // sheetRows: array of arrays (from XLSX sheet_to_json with header:1)
+  const headerIdx = [];
+  sheetRows.forEach((row, i) => {
+    if (row && String(row[1] || "").includes("Petty Cash")) headerIdx.push(i);
+  });
+  if (headerIdx.length === 0) throw new Error("Couldn't find any 'Petty Cash' day headers in this file.");
+
+  const dates = [];
+  const start = new Date(firstDate + "T00:00:00");
+  const toLocalYMD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  for (let i = 0; i < headerIdx.length; i++) {
+    const dt = new Date(start);
+    dt.setDate(dt.getDate() + i);
+    dates.push(toLocalYMD(dt));
+  }
+
+  const blocks = headerIdx.map((h, i) => [h + 4, i + 1 < headerIdx.length ? headerIdx[i + 1] : sheetRows.length, dates[i]]);
+
+  let allRows = [];
+  for (const [blockStart, blockEnd, date] of blocks) {
+    allRows = allRows.concat(extractRowsFromSheetBlock(sheetRows, blockStart, blockEnd, date));
+  }
+
+  const { rowsOut, skippedPending, mixedFlagged } = classifyExtractedRows(allRows);
   return { rowsOut, skippedPending, mixedFlagged, dayCount: headerIdx.length, dateRange: [dates[0], dates[dates.length - 1]] };
 }
+
+function processPastedRows(pastedRows, date) {
+  // pastedRows: array of arrays, e.g. from pasting copied Excel/Sheets cells (tab-separated).
+  // Treated as ONE single day's transactions -- no "Petty Cash" header search needed.
+  const allRows = extractRowsFromSheetBlock(pastedRows, 0, pastedRows.length, date);
+  const { rowsOut, skippedPending, mixedFlagged } = classifyExtractedRows(allRows);
+  return { rowsOut, skippedPending, mixedFlagged, dayCount: 1, dateRange: [date, date] };
+}
+
 
 function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [mode, setMode] = useState("formatted"); // "formatted" | "raw"
@@ -654,6 +683,9 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
   const [rawError, setRawError] = useState("");
   const [rawConfirmed, setRawConfirmed] = useState(false);
   const rawFileRef = useRef(null);
+  const [rawInputType, setRawInputType] = useState("file"); // "file" | "paste"
+  const [pasteText, setPasteText] = useState("");
+  const [pasteDate, setPasteDate] = useState("");
 
 
   const loadRecentBatches = useCallback(async () => {
@@ -806,6 +838,19 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     reader.readAsArrayBuffer(rawFile);
   };
 
+  const runPasteProcessing = () => {
+    if (!pasteText.trim() || !pasteDate) return;
+    setRawError("");
+    try {
+      // Rows copied from Excel/Google Sheets paste as tab-separated text.
+      const rows = pasteText.split("\n").filter((l) => l.trim() !== "").map((line) => line.split("\t"));
+      const result = processPastedRows(rows, pasteDate);
+      setRawResult(result);
+    } catch (err) {
+      setRawError(err.message || "Couldn't process the pasted rows.");
+    }
+  };
+
   const doRawImport = async () => {
     if (!rawResult || rawResult.rowsOut.length === 0) return;
     setImporting(true);
@@ -823,6 +868,7 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
     setResult({ inserted, errors, batchId: errors.length === 0 ? batchId : null, minDate: rawResult.dateRange[0], maxDate: rawResult.dateRange[1] });
     if (errors.length === 0) {
       setRawFile(null); setRawResult(null); setRawFirstDate(""); setRawConfirmed(false);
+      setPasteText(""); setPasteDate("");
       if (rawFileRef.current) rawFileRef.current.value = "";
       onDone();
       loadRecentBatches();
@@ -854,19 +900,53 @@ function ImportCSV({ incomeCats, expenseCats, onDone }) {
       {mode === "raw" && (
         <div>
           <p className="text-xs text-slate-500 mb-3">
-            Upload the hotel's raw monthly petty cash Excel file directly — no need to pre-format anything.
-            The app will find each day's transactions, categorize them, and show you a full preview
-            (with anything uncertain clearly flagged) before you confirm.
+            Process the hotel's raw petty cash data directly — no need to pre-format anything.
+            The app finds each transaction, categorizes it, and shows a full preview (with anything
+            uncertain clearly flagged) before you confirm.
           </p>
-          <input ref={rawFileRef} type="file" accept=".xlsx,.xls" onChange={handleRawFile} className="block w-full text-xs mb-3" />
-          {rawFile && (
+          <div className="flex rounded-lg overflow-hidden border border-slate-200 mb-3">
+            <button onClick={() => setRawInputType("file")} className={"flex-1 py-1.5 text-[11px] font-semibold " + (rawInputType === "file" ? "bg-slate-700 text-white" : "bg-white text-slate-600")}>
+              Upload monthly file
+            </button>
+            <button onClick={() => setRawInputType("paste")} className={"flex-1 py-1.5 text-[11px] font-semibold " + (rawInputType === "paste" ? "bg-slate-700 text-white" : "bg-white text-slate-600")}>
+              Paste today's rows
+            </button>
+          </div>
+
+          {rawInputType === "file" && (
             <>
-              <label className="block text-xs text-slate-600 mb-1">What calendar date is the first day-block in this sheet?</label>
-              <input type="date" value={rawFirstDate} onChange={(e) => setRawFirstDate(e.target.value)}
+              <input ref={rawFileRef} type="file" accept=".xlsx,.xls" onChange={handleRawFile} className="block w-full text-xs mb-3" />
+              {rawFile && (
+                <>
+                  <label className="block text-xs text-slate-600 mb-1">What calendar date is the first day-block in this sheet?</label>
+                  <input type="date" value={rawFirstDate} onChange={(e) => setRawFirstDate(e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm bg-white" />
+                  <button onClick={runRawProcessing} disabled={!rawFirstDate}
+                    className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (rawFirstDate ? "bg-teal-700" : "bg-slate-300")}>
+                    Process sheet
+                  </button>
+                </>
+              )}
+            </>
+          )}
+
+          {rawInputType === "paste" && (
+            <>
+              <p className="text-[11px] text-slate-500 mb-2">
+                For daily use — no file to save at all. In your live sheet, select today's transaction
+                rows (the <strong>full row range</strong>, columns A through L exactly as they appear —
+                Item#, Description, the two income columns, Kitchen/Bar/Maintain/HouseKP/Other/Transfers,
+                Balance, Card), copy (Ctrl+C), then paste below.
+              </p>
+              <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={6}
+                placeholder="Paste copied rows here…"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-xs font-mono" />
+              <label className="block text-xs text-slate-600 mb-1">What date are these rows for?</label>
+              <input type="date" value={pasteDate} onChange={(e) => setPasteDate(e.target.value)}
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 mb-3 text-sm bg-white" />
-              <button onClick={runRawProcessing} disabled={!rawFirstDate}
-                className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (rawFirstDate ? "bg-teal-700" : "bg-slate-300")}>
-                Process sheet
+              <button onClick={runPasteProcessing} disabled={!pasteText.trim() || !pasteDate}
+                className={"w-full py-2.5 rounded-lg text-sm font-semibold text-white mb-3 " + (pasteText.trim() && pasteDate ? "bg-teal-700" : "bg-slate-300")}>
+                Process pasted rows
               </button>
             </>
           )}
