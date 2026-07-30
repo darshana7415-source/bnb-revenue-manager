@@ -534,6 +534,7 @@ function rawIncomeCategory(desc) {
   if (d.includes("laundry income")) return "Guest Laundry";
   if (d.includes("whale watching")) return "Whale Watching";
   if (d.includes("snorkel")) return "Diving & Snorkeling";
+  if (d.includes("out side") || d.includes("outside")) return "Restaurant"; // hotel's own shorthand for restaurant bills, unless it's laundry-related (checked above already)
   // Genuine room charge -- figure out which booking channel it came through.
   // Check specific OTA brand names first (these get their own category and,
   // in Booking.com's case, the 18% commission calc); "TA transfer" or the
@@ -608,6 +609,8 @@ function extractRowsFromSheetBlock(sheetRows, blockStart, blockEnd, date) {
     if (!row) continue;
     const desc = row[1];
     if (desc === undefined || desc === null || String(desc).trim() === "") continue;
+    const descTrim = String(desc).trim().toLowerCase();
+    if (descTrim.startsWith("open box")) continue; // opening balance carried over -- never a real transaction
     if (String(desc).toUpperCase().includes("DAY CLOSED")) break;
     if (String(desc).toLowerCase().includes("transferred to safety box")) continue;
     const vals = {};
