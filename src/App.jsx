@@ -21,6 +21,8 @@ const STATUS_STYLE = {
   checkout: "bg-amber-50 border-amber-300 text-amber-800",
 };
 const BCOM_CAT = "Room – Booking.com";
+const GOMMT_CAT = "Room – Go-MMT";
+const OTA_COMMISSION_CATS = [BCOM_CAT, GOMMT_CAT];
 const BCOM_RATE = 0.18;
 const CARD_COMMISSION_RATE = 0.03;
 const ONLINE_COMMISSION_RATE = 0.02;
@@ -1389,7 +1391,7 @@ export default function App() {
         continue;
       }
 
-      const bcom = t.type === "income" && t.category === BCOM_CAT ? v * BCOM_RATE : 0;
+      const bcom = t.type === "income" && OTA_COMMISSION_CATS.includes(t.category) ? v * BCOM_RATE : 0;
       const cardCom = t.type === "income" && CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : 0;
       const onlineCom = t.type === "income" && t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
       bcomAll += bcom; cardComAll += cardCom; onlineComAll += onlineCom;
@@ -1429,7 +1431,7 @@ export default function App() {
         fx[cur].com += fxCom;
         continue;
       }
-      const bcom = t.type === "income" && t.category === BCOM_CAT ? v * BCOM_RATE : 0;
+      const bcom = t.type === "income" && OTA_COMMISSION_CATS.includes(t.category) ? v * BCOM_RATE : 0;
       const cardCom = t.type === "income" && CARD_PROVIDERS.includes(t.method) ? v * CARD_COMMISSION_RATE : 0;
       const onlineCom = t.type === "income" && t.method === "Online" ? v * ONLINE_COMMISSION_RATE : 0;
       t.type === "income" ? (mi += v) : (me += v);
@@ -1499,7 +1501,7 @@ export default function App() {
       }
       if (t.type === "income") {
         ti += v;
-        if (t.category === BCOM_CAT) bcom += v * BCOM_RATE;
+        if (OTA_COMMISSION_CATS.includes(t.category)) bcom += v * BCOM_RATE;
         if (CARD_PROVIDERS.includes(t.method)) cardCom += v * CARD_COMMISSION_RATE;
         if (t.method === "Online") onlineCom += v * ONLINE_COMMISSION_RATE;
       }
@@ -1724,7 +1726,7 @@ export default function App() {
 
               {stats.bcomAll > 0 && (
                 <div className="bg-white rounded-xl border border-slate-200 p-3 mb-3">
-                  <div className="text-xs text-slate-500 mb-1.5">Booking.com commission accrued (18%)</div>
+                  <div className="text-xs text-slate-500 mb-1.5">Booking.com + Go-MMT commission accrued (18%)</div>
                   <div className="grid grid-cols-3 gap-2 text-center">
                     <div><div className="text-[10px] uppercase tracking-wide text-slate-400">Today</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.bcomToday)}</div></div>
                     <div><div className="text-[10px] uppercase tracking-wide text-slate-400">This month</div><div className="text-sm font-semibold tabular-nums text-orange-700">{fmt(stats.bcomMonth)}</div></div>
@@ -1955,7 +1957,7 @@ export default function App() {
                         </div>
                         {dayReport.bcom > 0 && (
                           <div className="flex justify-between text-xs pt-1.5">
-                            <span className="text-orange-700">Less: Booking.com commission (18%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.bcom)}</span>
+                            <span className="text-orange-700">Less: Booking.com + Go-MMT commission (18%)</span><span className="tabular-nums text-orange-700 font-semibold">−{fmt(dayReport.bcom)}</span>
                           </div>
                         )}
                         {dayReport.cardCom > 0 && (
@@ -2062,7 +2064,7 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <StatCard label="Month income" value={fmt(monthReportStats.mi)} tone="up" />
                     <StatCard label="Month expenses" value={fmt(monthReportStats.me)} tone="down" />
-                    <StatCard label="B.com commission (18%)" value={"−" + fmt(monthReportStats.bcomMonth)} tone="down" />
+                    <StatCard label="Booking.com + Go-MMT commission (18%)" value={"−" + fmt(monthReportStats.bcomMonth)} tone="down" />
                     <StatCard label="Card commission (3%)" value={"−" + fmt(monthReportStats.cardComMonth)} tone="down" />
                     <StatCard label="Online commission (2%)" value={"−" + fmt(monthReportStats.onlineComMonth)} tone="down" />
                   </div>
@@ -2165,7 +2167,7 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-3 mb-3">
                     <StatCard label="Year income (LKR)" value={fmt(stats.yi)} tone="up" />
                     <StatCard label="Year expenses (LKR)" value={fmt(stats.ye)} tone="down" />
-                    <StatCard label="B.com commission (18%)" value={"−" + fmt(stats.bcomYear)} tone="down" />
+                    <StatCard label="Booking.com + Go-MMT commission (18%)" value={"−" + fmt(stats.bcomYear)} tone="down" />
                     <StatCard label="Card + Online commission" value={"−" + fmt(stats.cardComYear + stats.onlineComYear)} tone="down" />
                   </div>
                   <div className="grid grid-cols-1 gap-3 mb-3">
