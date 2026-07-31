@@ -469,7 +469,8 @@ const RAW_FLAG_PERSONAL = ["for madam","madam ","nipuni shopping","for buddhika"
 
 function rawIsPending(desc) {
   const d = desc.toLowerCase();
-  const hasPendingWord = d.includes("(pending)") || d.includes("pending") || d.includes("prnding");
+  // "pend" as a substring catches "pending" and typo'd "pendding"; "prnding" is a distinct typo (missing the 'e') checked separately
+  const hasPendingWord = d.includes("pend") || d.includes("prnding");
   const alreadyPaid = d.includes("paid") || d.includes("(paid)") || d.includes("transferd");
   return hasPendingWord && !alreadyPaid;
 }
@@ -530,8 +531,8 @@ function rawIncomeCategory(desc) {
   const d = desc.toLowerCase();
   if (d.includes("spa")) return "Spa";
   if (d.includes("mini bar")) return "Other income";
-  if (d.includes("res bill") || d.includes("resbill")) return "Restaurant";
-  if (d.includes("laundry income")) return "Guest Laundry";
+  if (d.includes("res bill") || d.includes("resbill") || d.includes("restaurant bill") || d.includes("restuarent bill") || d.includes("restaurent bill")) return "Restaurant";
+  if (d.includes("laundry income") || (d.includes("checkout") && d.includes("laundry")) || (d.includes("check out") && d.includes("laundry"))) return "Guest Laundry";
   if (d.includes("whale watching")) return "Whale Watching";
   if (d.includes("snorkel")) return "Diving & Snorkeling";
   if (d.includes("out side") || d.includes("outside")) return "Restaurant"; // hotel's own shorthand for restaurant bills, unless it's laundry-related (checked above already)
@@ -540,9 +541,9 @@ function rawIncomeCategory(desc) {
   // in Booking.com's case, the 18% commission calc); "TA transfer" or the
   // word "agent" catches any named travel agency (Holiday Lanka, EDT, etc.)
   // which all fold into one Agent Booking category rather than one per agency.
-  if (d.includes("booking com") || d.includes("booking.com")) return "Room – Booking.com";
+  if (d.includes("booking com") || d.includes("booking.com") || d.includes("b.com")) return "Room – Booking.com";
   if (d.includes("expedia")) return "Room – Expedia";
-  if (d.includes("go mmt") || d.includes("gommt") || d.includes(" mmt")) return "Room – Go-MMT";
+  if (d.includes("go mmt") || d.includes("gommt") || d.includes("mmt")) return "Room – Go-MMT";
   if (d.includes("agoda")) return "Room – Agoda";
   if (d.includes("ta transfer") || d.includes("travel agent")) return "Room – Agent Booking";
   return "Room – Direct";
@@ -575,6 +576,14 @@ function classifyExtractedRows(allRows) {
     if (Object.keys(vals).length === 0) continue;
     const keys = Object.keys(vals);
     const isIncomeCols = keys.some((k) => RAW_INCOME_KEYS.has(k));
+    const hasNonIncomeCol = keys.some((k) => !RAW_INCOME_KEYS.has(k));
+
+    if (isIncomeCols && hasNonIncomeCol) {
+      // e.g. an income amount AND an unrelated "Other" column value on the same row --
+      // don't silently drop one of them, flag for manual entry instead.
+      mixedFlagged.push(r);
+      continue;
+    }
 
     if (isIncomeCols) {
       const byCur = {};
