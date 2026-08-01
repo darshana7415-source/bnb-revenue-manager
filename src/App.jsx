@@ -547,7 +547,7 @@ function rawIncomeCategory(desc) {
   if (d.includes("expedia")) return "Room – Expedia";
   if (d.includes("go mmt") || d.includes("gommt") || d.includes("mmt")) return "Room – Go-MMT";
   if (d.includes("agoda")) return "Room – Agoda";
-  if (d.includes("ta transfer") || d.includes("travel agent")) return "Room – Agent Booking";
+  if (d.includes("ta transfer") || d.includes("travel agent") || /\bta\b/.test(d)) return "Room – Agent Booking";
   return "Room – Direct";
 }
 
