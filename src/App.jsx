@@ -531,8 +531,10 @@ function rawGuestEvent(desc) {
 }
 function rawIncomeCategory(desc) {
   const d = desc.toLowerCase();
+  const compact = d.replace(/\s+/g, ""); // strips all spaces, so "booking .com" / "booking. com" etc. all normalize the same way
   if (d.includes("spa")) return "Spa";
   if (d.includes("mini bar")) return "Other income";
+  if (d.includes("breakage") || d.includes("brekage") || d.includes("broken glass") || d.includes("key card missing")) return "Other income";
   if (d.includes("res bill") || d.includes("resbill") || d.includes("restaurant bill") || d.includes("restuarent bill") || d.includes("restaurent bill")) return "Restaurant";
   if (d.includes("laundry income") || (d.includes("checkout") && d.includes("laundry")) || (d.includes("check out") && d.includes("laundry"))) return "Guest Laundry";
   if (d.includes("whale watching")) return "Whale Watching";
@@ -543,10 +545,13 @@ function rawIncomeCategory(desc) {
   // in Booking.com's case, the 18% commission calc); "TA transfer" or the
   // word "agent" catches any named travel agency (Holiday Lanka, EDT, etc.)
   // which all fold into one Agent Booking category rather than one per agency.
-  if (d.includes("booking com") || d.includes("booking.com") || d.includes("b.com")) return "Room – Booking.com";
+  if (compact.includes("booking.com") || compact.includes("bookingcom") || d.includes("b.com") || d.includes("booikng")) return "Room – Booking.com";
   if (d.includes("expedia")) return "Room – Expedia";
   if (d.includes("go mmt") || d.includes("gommt") || d.includes("mmt")) return "Room – Go-MMT";
   if (d.includes("agoda")) return "Room – Agoda";
+  // Known named travel agencies that don't use "TA"/"transfer" wording -- add new ones here as they come up
+  const KNOWN_AGENCY_NAMES = ["unwind tours", "unwind ceylon", "holiday lanka", "drop me tours"];
+  if (KNOWN_AGENCY_NAMES.some((a) => d.includes(a))) return "Room – Agent Booking";
   if (d.includes("ta transfer") || d.includes("travel agent") || /\bta\b/.test(d)) return "Room – Agent Booking";
   return "Room – Direct";
 }
